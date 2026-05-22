@@ -1,26 +1,14 @@
 """
-News Scout — Gemini 2.5 Flash + multi-source image strategy.
-
-Strategy:
-1. Gemini finds the news AND lists multiple potential image URLs.
-2. We try each URL in order until one downloads successfully.
-3. Last resort: try og:image from source article.
+News Scout — Gemini 2.5 Flash + robust image fetching.
 """
 
 import os
 import json
 import re
 import time
-import requests
 import logging
-from urllib.parse import urlparse, quote_plus
-
-log = logging.getLogger('news_scout')
-log.setLevel(logging.INFO)
-if not log.handlers:
-    h = logging.StreamHandler()
-    h.setFormatter(logging.Formatter('%(asctime)s | news_scout | %(message)s'))
-    log.addHandler(h)
+import requests
+from urllib.parse import urlparse, quote
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -29,28 +17,33 @@ if not GEMINI_API_KEY:
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
 
+log = logging.getLogger("news_scout")
+log.setLevel(logging.INFO)
+if not log.handlers:
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter('%(asctime)s | news_scout | %(message)s'))
+    log.addHandler(h)
+
 
 PROMPT_TEMPLATE = """أنت كاتب محتوى تقني محترف لصفحة عربية "4Ever".
 
 ابحث في الإنترنت عن آخر خبر حديث ومثير من آخر 7 أيام في أحد هذه المجالات:
 - 🤖 الذكاء الاصطناعي (OpenAI, Anthropic, Google, Meta, Microsoft, xAI)
 - 📱 الهواتف الذكية (Apple, Samsung, Xiaomi, Google Pixel, OnePlus)
-- 🎮 الألعاب والـ Gaming (PlayStation, Xbox, Nintendo, Steam, إطلاقات ألعاب)
-- 💻 التقنيات والحوسبة (NVIDIA, AMD, Intel, شرائح, GPU, معالجات)
-- 🔓 التسريبات التقنية (تسريبات منتجات قادمة، شائعات موثوقة)
-- 🚗 التقنيات الناشئة (سيارات ذاتية القيادة، روبوتات، VR/AR)
+- 🎮 الألعاب (PlayStation, Xbox, Nintendo, Steam)
+- 💻 التقنيات (NVIDIA, AMD, Intel, شرائح)
+- 🔓 التسريبات التقنية
+- 🚗 التقنيات الناشئة (سيارات ذاتية، روبوتات، VR/AR)
 
-تنويع: لا تختر دائماً نفس النوع. لو سبق وغطّيت AI، اختر هاتف أو لعبة.
+تنويع: لو غطّيت AI، اختر هاتف أو لعبة في المرة القادمة.
 
-⚠️ قواعد صور المنتجات:
-- استخدم Google Search لتجد روابط صور حقيقية مباشرة
-- اقترح 3 روابط صور مختلفة (في حال فشل أحدها)
-- اختر صور كبيرة (>800x400 بكسل) من مصادر موثوقة:
-  - Wikipedia/Wikimedia: upload.wikimedia.org
-  - مواقع التقنية: theverge.com, techcrunch.com, engadget.com
-  - مواقع الألعاب: ign.com, gamespot.com, polygon.com
-  - مواقع الشركات الرسمية
-- الصور يجب أن تكون متاحة بدون تسجيل دخول
+⚠️ مهم جداً عن image_query: لا تعطنا روابط صور (لأنها تفشل غالباً).
+بدلاً من ذلك، أعطنا **استعلام بحث صور باللغة الإنجليزية فقط** يصف المنتج/الموضوع بدقة.
+أمثلة جيدة:
+- "NVIDIA Blackwell B200 GPU"
+- "Apple iPhone 17 Pro"
+- "GTA 6 official screenshot"
+- "Samsung Galaxy S26 Ultra"
 
 أنتج JSON فقط (بدون code fences):
 
@@ -58,28 +51,32 @@ PROMPT_TEMPLATE = """أنت كاتب محتوى تقني محترف لصفحة �
   "headline_line1": "عنوان عربي - أقل من 50 حرف",
   "headline_line2_ar": "السطر 2 - أقل من 25 حرف",
   "headline_line2_en": "اسم المنتج بالإنجليزية أو فارغ",
-  "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai|samsung|sony|nintendo|xiaomi|amd|intel",
+  "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai|samsung|sony|nintendo|xiaomi|amd|intel|playstation|xbox|qualcomm",
   "category": "ai|phone|gaming|hardware|leak|emerging",
-  "product_badge": "تسمية إنجليزية كبيرة فقط - مثل: GPT-5 • REASONING أو iPhone 17 • PRO",
-  "live_badge": "مواصفات بالإنجليزية - مثل: A19 PRO • 200B • LIVE",
+  "product_badge": "تسمية إنجليزية بأحرف لاتينية كبيرة فقط",
+  "live_badge": "مواصفات بالإنجليزية فقط",
   "caption": "كابشن عربي كامل:\\n\\n[هوك مع إيموجي 🚀]\\n\\n[شرح في 2-3 أسطر]\\n\\n[الأهمية]\\n\\n🤔 [سؤال تفاعلي] 👇\\n\\n💡 لمزيد من التغطيات، اشترك في 4Ever!\\n\\n#وسم #تقنية #4Ever",
-  "image_urls": [
-    "https://رابط_صورة_1_مباشر.jpg",
-    "https://رابط_صورة_2_احتياطي.jpg",
-    "https://رابط_صورة_3_احتياطي.jpg"
-  ],
+  "image_query": "استعلام بحث صور بالإنجليزية يصف المنتج/الموضوع",
   "source_url": "رابط المقال الأصلي"
 }}
 
 {extra_instructions}"""
 
 
-# Generic / blacklisted images
-BAD_IMAGE_PATTERNS = [
-    "google-200x200", "blog.google/static", "favicon",
-    "logo-only", "default-thumbnail", "placeholder",
-    "/logo.", "social-image", "site-icon",
-]
+# Browser-like headers that work on most sites
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+}
+
+# Wikipedia requires a specific user-agent
+WIKIPEDIA_HEADERS = {
+    "User-Agent": "4EverBot/1.0 (https://t.me/rasof_bot; bot@4ever.com) requests/2.32",
+    "Accept": "image/*",
+}
 
 
 def extract_json(text):
@@ -93,31 +90,25 @@ def extract_json(text):
     return json.loads(text[s:e + 1])
 
 
-def is_bad_image(url):
-    if not url:
-        return True
-    low = url.lower()
-    return any(bad in low for bad in BAD_IMAGE_PATTERNS)
-
-
 def try_download_image(url, save_path):
     """Try downloading an image, return True on success."""
-    if not url or is_bad_image(url):
+    if not url:
         return False
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "image/*,*/*",
-            "Referer": "https://www.google.com/",
-        }
+        # Pick right headers based on domain
+        if "wikipedia.org" in url or "wikimedia.org" in url:
+            headers = WIKIPEDIA_HEADERS
+        else:
+            headers = DEFAULT_HEADERS
+
         r = requests.get(url, headers=headers, timeout=20, stream=True,
                          allow_redirects=True)
         if r.status_code != 200:
+            log.warning(f"   HTTP {r.status_code} for {url[:60]}")
             return False
         ct = r.headers.get("content-type", "").lower()
         if not (ct.startswith("image/") or "octet-stream" in ct):
+            log.warning(f"   Not an image: {ct} for {url[:60]}")
             return False
 
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -129,6 +120,7 @@ def try_download_image(url, save_path):
 
         if total < 5000:
             os.unlink(save_path)
+            log.warning(f"   Too small: {total} bytes")
             return False
 
         from PIL import Image
@@ -139,77 +131,114 @@ def try_download_image(url, save_path):
                 w, h = img.size
                 if w < 400 or h < 200:
                     os.unlink(save_path)
+                    log.warning(f"   Bad dimensions: {w}x{h}")
                     return False
+            log.info(f"   ✅ Got {total//1024}KB, {w}x{h}")
             return True
-        except Exception:
+        except Exception as ex:
             if os.path.exists(save_path):
                 os.unlink(save_path)
+            log.warning(f"   Invalid image: {ex}")
             return False
     except Exception as e:
-        log.warning(f"   ⚠️  Download attempt failed: {e}")
+        log.warning(f"   Exception: {e}")
         return False
 
 
-def extract_og_image(article_url):
-    """Last-resort: fetch article and extract og:image."""
+def search_images_via_bing(query, max_results=8):
+    """
+    Use Bing image search via its public scrape endpoint.
+    Returns list of direct image URLs.
+    """
     try:
-        headers = {
+        url = f"https://www.bing.com/images/search?q={quote(query)}&form=HDRSC2&first=1"
+        r = requests.get(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/120.0.0.0 Safari/537.36",
-        }
-        r = requests.get(article_url, headers=headers, timeout=15,
-                         allow_redirects=True)
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.9",
+        }, timeout=15)
         if r.status_code != 200:
-            return None
-        html = r.text
-        patterns = [
-            r'<meta\s+property=["\']og:image:secure_url["\']\s+content=["\']([^"\']+)["\']',
-            r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']',
-            r'<meta\s+content=["\']([^"\']+)["\']\s+property=["\']og:image["\']',
-            r'<meta\s+name=["\']twitter:image["\']\s+content=["\']([^"\']+)["\']',
-        ]
-        for pattern in patterns:
-            for m in re.finditer(pattern, html, re.IGNORECASE):
-                img_url = m.group(1)
-                if img_url.startswith("//"):
-                    img_url = "https:" + img_url
-                elif img_url.startswith("/"):
-                    p = urlparse(article_url)
-                    img_url = f"{p.scheme}://{p.netloc}{img_url}"
-                if not is_bad_image(img_url):
-                    return img_url
-        return None
-    except Exception:
-        return None
+            log.warning(f"   Bing search returned {r.status_code}")
+            return []
+
+        # Bing embeds image metadata in 'm' attribute as JSON
+        # Pattern: m="{...&quot;murl&quot;:&quot;https://...&quot;...}"
+        urls = []
+        for m in re.finditer(r'murl&quot;:&quot;(https?://[^&"]+?)&quot;', r.text):
+            img_url = m.group(1).replace("&amp;", "&")
+            urls.append(img_url)
+            if len(urls) >= max_results:
+                break
+        log.info(f"   Bing found {len(urls)} candidate images")
+        return urls
+    except Exception as e:
+        log.warning(f"   Bing search failed: {e}")
+        return []
 
 
-def find_working_image(image_urls, source_url, save_path):
-    """Try each candidate URL, then fall back to og:image."""
-    # Try each Gemini-provided URL
-    for i, url in enumerate(image_urls or []):
-        log.info(f"   🔗 Try {i+1}/{len(image_urls)}: {url[:80]}")
+def search_images_via_duckduckgo(query, max_results=8):
+    """Fallback: DuckDuckGo image search (no API key needed)."""
+    try:
+        # Get vqd token
+        r = requests.get(f"https://duckduckgo.com/?q={quote(query)}&iax=images&ia=images",
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        m = re.search(r'vqd=([\d-]+)', r.text)
+        if not m:
+            return []
+        vqd = m.group(1)
+
+        r2 = requests.get(
+            f"https://duckduckgo.com/i.js?l=us-en&o=json&q={quote(query)}&vqd={vqd}&f=,,,,,&p=1",
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://duckduckgo.com/",
+            }, timeout=15
+        )
+        data = r2.json()
+        urls = [r.get("image") for r in data.get("results", [])[:max_results] if r.get("image")]
+        log.info(f"   DuckDuckGo found {len(urls)} candidate images")
+        return urls
+    except Exception as e:
+        log.warning(f"   DuckDuckGo failed: {e}")
+        return []
+
+
+def find_working_image(image_query, save_path):
+    """
+    Strategy: Search Bing → DuckDuckGo for the query, try each result.
+    """
+    if not image_query:
+        log.warning("   No image_query provided")
+        return False
+
+    log.info(f"🔍 Searching for: {image_query}")
+
+    # Try Bing first
+    urls = search_images_via_bing(image_query)
+
+    # Fallback to DuckDuckGo
+    if not urls:
+        log.info("   Bing returned nothing, trying DuckDuckGo...")
+        urls = search_images_via_duckduckgo(image_query)
+
+    if not urls:
+        log.warning("   No image candidates from any search engine")
+        return False
+
+    # Try each URL until one works
+    for i, url in enumerate(urls):
+        log.info(f"   🔗 Try {i+1}/{len(urls)}: {url[:80]}")
         if try_download_image(url, save_path):
-            log.info(f"   ✅ Success!")
             return True
-        log.info(f"   ❌ Failed")
 
-    # Fallback: og:image from source article
-    if source_url:
-        log.info(f"   🔄 Fallback: extracting og:image from source...")
-        og = extract_og_image(source_url)
-        if og:
-            log.info(f"   🔗 og:image: {og[:80]}")
-            if try_download_image(og, save_path):
-                log.info(f"   ✅ Success!")
-                return True
-
-    log.info(f"   ❌ All image sources failed")
+    log.warning("   ❌ All search results failed")
     return False
 
 
 def scout_news(extra_instructions="", max_retries=3):
-    """Call Gemini, get news + multiple image URLs."""
+    """Call Gemini, get news + image search query."""
     prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions or "")
 
     body = {
@@ -254,14 +283,19 @@ def scout_news(extra_instructions="", max_retries=3):
                 if k not in result:
                     raise ValueError(f"Missing: {k}")
 
-            # Normalize image_urls (handle both list and single string)
-            if "image_urls" not in result:
-                result["image_urls"] = []
-            if isinstance(result["image_urls"], str):
-                result["image_urls"] = [result["image_urls"]]
-            # Also accept old 'image_url' field
-            if "image_url" in result and result["image_url"]:
-                result["image_urls"].insert(0, result["image_url"])
+            # Build a smart fallback query from EN headline + source
+            if not result.get("image_query"):
+                src = result.get("source", "")
+                en = result.get("headline_line2_en", "")
+                cat = result.get("category", "")
+                if en and src:
+                    result["image_query"] = f"{src} {en}"
+                elif en:
+                    result["image_query"] = en
+                elif src:
+                    result["image_query"] = f"{src} {cat}"
+                else:
+                    result["image_query"] = result["headline_line1"][:50]
 
             return result
         except Exception as e:
@@ -275,12 +309,11 @@ def scout_news(extra_instructions="", max_retries=3):
 
 
 def download_image(news_data, save_path):
-    """Smart image download: tries multiple URLs from news_data."""
-    image_urls = news_data.get("image_urls", [])
-    source_url = news_data.get("source_url", "")
-    if find_working_image(image_urls, source_url, save_path):
+    """Search for and download an image based on news_data."""
+    query = news_data.get("image_query", "")
+    if find_working_image(query, save_path):
         return save_path
-    raise ValueError("No working image found after trying all sources")
+    raise ValueError(f"No working image found for query: {query}")
 
 
 def scout_multiple(count):
