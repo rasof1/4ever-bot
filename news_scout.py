@@ -12,7 +12,15 @@ import json
 import re
 import time
 import requests
+import logging
 from urllib.parse import urlparse, quote_plus
+
+log = logging.getLogger('news_scout')
+log.setLevel(logging.INFO)
+if not log.handlers:
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter('%(asctime)s | news_scout | %(message)s'))
+    log.addHandler(h)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -138,7 +146,7 @@ def try_download_image(url, save_path):
                 os.unlink(save_path)
             return False
     except Exception as e:
-        print(f"   ⚠️  Download attempt failed: {e}")
+        log.warning(f"   ⚠️  Download attempt failed: {e}")
         return False
 
 
@@ -180,23 +188,23 @@ def find_working_image(image_urls, source_url, save_path):
     """Try each candidate URL, then fall back to og:image."""
     # Try each Gemini-provided URL
     for i, url in enumerate(image_urls or []):
-        print(f"   🔗 Try {i+1}/{len(image_urls)}: {url[:80]}")
+        log.info(f"   🔗 Try {i+1}/{len(image_urls)}: {url[:80]}")
         if try_download_image(url, save_path):
-            print(f"   ✅ Success!")
+            log.info(f"   ✅ Success!")
             return True
-        print(f"   ❌ Failed")
+        log.info(f"   ❌ Failed")
 
     # Fallback: og:image from source article
     if source_url:
-        print(f"   🔄 Fallback: extracting og:image from source...")
+        log.info(f"   🔄 Fallback: extracting og:image from source...")
         og = extract_og_image(source_url)
         if og:
-            print(f"   🔗 og:image: {og[:80]}")
+            log.info(f"   🔗 og:image: {og[:80]}")
             if try_download_image(og, save_path):
-                print(f"   ✅ Success!")
+                log.info(f"   ✅ Success!")
                 return True
 
-    print(f"   ❌ All image sources failed")
+    log.info(f"   ❌ All image sources failed")
     return False
 
 
@@ -224,7 +232,7 @@ def scout_news(extra_instructions="", max_retries=3):
             if r.status_code == 429:
                 last_err = RuntimeError(f"Gemini rate limited (attempt {attempt+1})")
                 wait = 20 * (attempt + 1)
-                print(f"⏳ 429, waiting {wait}s...")
+                log.info(f"⏳ 429, waiting {wait}s...")
                 time.sleep(wait)
                 continue
             r.raise_for_status()
