@@ -1,10 +1,5 @@
 """
 News Scout — Uses Google Gemini 2.5 Flash + smart image extraction.
-
-Strategy:
-1. Gemini gives us: headlines, caption, source_url
-2. We visit source_url and extract og:image (real, reliable image)
-3. Fallback to image_url from Gemini if og:image not found
 """
 
 import os
@@ -12,6 +7,7 @@ import json
 import re
 import time
 import requests
+from urllib.parse import urlparse
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
@@ -26,7 +22,12 @@ PROMPT_TEMPLATE = """أنت كاتب محتوى تقني محترف لصفحة �
 ابحث في الإنترنت عن آخر خبر تقني/AI مهم وحديث من آخر 7 أيام.
 أولوية: OpenAI, Anthropic, Google, Meta, Microsoft, Apple, NVIDIA, xAI, GitHub.
 
-⚠️ مهم: source_url يجب أن يكون رابطاً حقيقياً يمكن فتحه (تأكّد منه).
+⚠️ قواعد صارمة لـ source_url:
+- يجب أن يكون رابط مقالة محدّدة (article) وليس صفحة فئة أو قسم
+- مثال صحيح: https://blog.google/technology/ai/gemini-2-5-pro-update/
+- مثال خاطئ: https://blog.google/products/gemini/ (هذا category)
+- يجب أن يحتوي على مسار طويل (3+ شرطات في الـ URL بعد domain)
+- يجب أن يكون من المصدر الرسمي للشركة (blog.google, openai.com/blog, anthropic.com/news, apple.com/newsroom, github.blog, ...)
 
 أنتج JSON صارم فقط (بدون code fences، بدون نص قبل/بعد):
 
@@ -35,13 +36,24 @@ PROMPT_TEMPLATE = """أنت كاتب محتوى تقني محترف لصفحة �
   "headline_line2_ar": "السطر 2 العربي - أقل من 25 حرف",
   "headline_line2_en": "اسم المنتج بالإنجليزية أو فارغ",
   "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai",
-  "product_badge": "تسمية إنجليزية بأحرف لاتينية كبيرة فقط، لا عربية ولا إيموجي - مثل: GPT-5 • REASONING MODEL أو APPLE INTELLIGENCE • ACCESSIBILITY",
-  "live_badge": "مواصفات بالإنجليزية فقط لا عربية - مثل: GPT-5 • 200B • LIVE أو IOS 18 • LIVE",
+  "product_badge": "تسمية إنجليزية بأحرف لاتينية كبيرة فقط، لا عربية ولا إيموجي",
+  "live_badge": "مواصفات بالإنجليزية فقط لا عربية",
   "caption": "كابشن عربي كامل بهذا القالب:\\n\\n[هوك مع إيموجي 🚀]\\n\\n[شرح في 2-3 أسطر]\\n\\n[الأهمية]\\n\\n🤔 [سؤال] 👇\\n\\n💡 لمزيد من التغطيات، اشترك في 4Ever!\\n\\n#وسم #ذكاء_اصطناعي #4Ever",
-  "source_url": "رابط مقال حقيقي يمكن فتحه (مهم جداً)"
+  "source_url": "رابط مقالة محدّدة كاملة (ليس صفحة فئة)"
 }}
 
 {extra_instructions}"""
+
+
+# Generic / blacklisted images we should reject
+BAD_IMAGE_PATTERNS = [
+    "google-200x200",  # Google blog fallback logo
+    "blog.google/static",  # Static blog assets
+    "favicon",
+    "logo-only",
+    "default-thumbnail",
+    "placeholder",
+]
 
 
 def extract_json(text):
@@ -55,11 +67,29 @@ def extract_json(text):
     return json.loads(text[s:e + 1])
 
 
+def is_article_url(url):
+    """Check if URL looks like a specific article (not category page)."""
+    if not url:
+        return False
+    try:
+        p = urlparse(url)
+        # Path should have substantial content (article slug)
+        path = p.path.strip("/")
+        if not path:
+            return False
+        # Article URLs usually have at least 2 segments and the last is descriptive
+        segments = path.split("/")
+        last = segments[-1]
+        # Last segment should be descriptive (>15 chars with hyphens, OR contain digits/year)
+        if len(last) < 15 and not re.search(r"\d{4}", last):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def extract_og_image(article_url):
-    """
-    Fetch article page and extract Open Graph image URL.
-    Falls back to twitter:image, then any large <img>.
-    """
+    """Fetch article page and extract og:image. Reject obviously bad images."""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -72,24 +102,29 @@ def extract_og_image(article_url):
         r.raise_for_status()
         html = r.text
 
-        # Try og:image (most reliable for articles)
         patterns = [
+            r'<meta\s+property=["\']og:image:secure_url["\']\s+content=["\']([^"\']+)["\']',
             r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']',
             r'<meta\s+content=["\']([^"\']+)["\']\s+property=["\']og:image["\']',
             r'<meta\s+name=["\']twitter:image["\']\s+content=["\']([^"\']+)["\']',
-            r'<meta\s+property=["\']og:image:url["\']\s+content=["\']([^"\']+)["\']',
         ]
+
         for pattern in patterns:
-            m = re.search(pattern, html, re.IGNORECASE)
-            if m:
+            for m in re.finditer(pattern, html, re.IGNORECASE):
                 img_url = m.group(1)
-                # Make absolute if relative
+                # Make absolute
                 if img_url.startswith("//"):
                     img_url = "https:" + img_url
                 elif img_url.startswith("/"):
-                    from urllib.parse import urlparse
                     p = urlparse(article_url)
                     img_url = f"{p.scheme}://{p.netloc}{img_url}"
+
+                # Reject blacklisted/generic images
+                low = img_url.lower()
+                if any(bad in low for bad in BAD_IMAGE_PATTERNS):
+                    print(f"   🚫 Rejected generic: {img_url[:80]}")
+                    continue
+
                 return img_url
         return None
     except Exception as e:
@@ -97,8 +132,30 @@ def extract_og_image(article_url):
         return None
 
 
+def verify_image_url(url):
+    """HEAD request to verify image exists and is large enough."""
+    if not url:
+        return False
+    try:
+        r = requests.head(url, timeout=15, allow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return False
+        ct = r.headers.get("content-type", "").lower()
+        if not ct.startswith("image/"):
+            return False
+        size = int(r.headers.get("content-length", "0"))
+        # Reject tiny images (likely logos/placeholders)
+        if 0 < size < 5000:  # <5KB
+            print(f"   🚫 Image too small ({size} bytes)")
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def scout_news(extra_instructions="", max_retries=3):
-    """Call Gemini 2.5 Flash with Google Search, then extract og:image."""
+    """Call Gemini, then extract verified article image."""
     prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions or "")
 
     body = {
@@ -145,14 +202,30 @@ def scout_news(extra_instructions="", max_retries=3):
                 if k not in result:
                     raise ValueError(f"Missing field: {k}")
 
-            # 🎯 Smart image extraction: fetch og:image from source article
-            print(f"🖼️  Extracting og:image from: {result['source_url']}")
-            og_image = extract_og_image(result["source_url"])
-            if og_image:
-                print(f"   ✅ Found: {og_image[:80]}")
+            # 🎯 Validate source_url is an article (not category)
+            src_url = result["source_url"]
+            if not is_article_url(src_url):
+                print(f"⚠️  source_url is not an article: {src_url}")
+                print(f"   Retrying with hint to Gemini...")
+                last_err = ValueError(f"Got category URL: {src_url}")
+                # Refine prompt
+                extra_instructions = (extra_instructions or "") + \
+                    f"\n\nالمحاولة السابقة فشلت: أعطيت رابط فئة بدل مقالة ({src_url}). "\
+                    "أعطني رابط مقالة محدّدة فيها slug وصفي طويل."
+                prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions)
+                body["contents"][0]["parts"][0]["text"] = prompt
+                time.sleep(3)
+                continue
+
+            # 🎯 Smart image extraction
+            print(f"🖼️  Extracting og:image from: {src_url}")
+            og_image = extract_og_image(src_url)
+
+            if og_image and verify_image_url(og_image):
+                print(f"   ✅ Verified: {og_image[:80]}")
                 result["image_url"] = og_image
             else:
-                print(f"   ⚠️  No og:image found, will use placeholder")
+                print(f"   ⚠️  No valid og:image found")
                 result["image_url"] = ""
 
             return result
@@ -167,7 +240,7 @@ def scout_news(extra_instructions="", max_retries=3):
 
 
 def download_image(url, save_path):
-    """Download image with browser-like headers + content-type check."""
+    """Download image with browser-like headers + validation."""
     if not url:
         raise ValueError("Empty image URL")
 
@@ -194,18 +267,24 @@ def download_image(url, save_path):
             f.write(chunk)
             total += len(chunk)
 
-    if total < 1000:  # < 1KB is probably a broken response
+    if total < 5000:  # <5KB is probably a logo/placeholder
         os.unlink(save_path)
-        raise ValueError(f"Downloaded file too small ({total} bytes)")
+        raise ValueError(f"Image too small ({total} bytes)")
 
-    # Verify it's actually a valid image
     from PIL import Image
     try:
         with Image.open(save_path) as img:
             img.verify()
+        # Re-open for dimensions (verify closes the file)
+        with Image.open(save_path) as img:
+            w, h = img.size
+            if w < 400 or h < 200:
+                os.unlink(save_path)
+                raise ValueError(f"Image too small dimensions ({w}x{h})")
     except Exception as e:
-        os.unlink(save_path)
-        raise ValueError(f"Invalid image file: {e}")
+        if os.path.exists(save_path):
+            os.unlink(save_path)
+        raise ValueError(f"Invalid image: {e}")
 
     return save_path
 
