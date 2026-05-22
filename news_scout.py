@@ -38,12 +38,25 @@ PROMPT_TEMPLATE = """أنت كاتب محتوى تقني محترف لصفحة �
 تنويع: لو غطّيت AI، اختر هاتف أو لعبة في المرة القادمة.
 
 ⚠️ مهم جداً عن image_query: لا تعطنا روابط صور (لأنها تفشل غالباً).
-بدلاً من ذلك، أعطنا **استعلام بحث صور باللغة الإنجليزية فقط** يصف المنتج/الموضوع بدقة.
+بدلاً من ذلك، أعطنا **استعلام بحث صور إنجليزي وصفي مفصّل** يجد صورة واقعية للمنتج/الحدث.
+
+❌ تجنّب: استعلامات عامة جداً تجلب شعارات (مثل "Google" أو "Apple" فقط)
+✅ استخدم: وصف للمنتج بحد ذاته بكلمات وصفية
+
 أمثلة جيدة:
-- "NVIDIA Blackwell B200 GPU"
-- "Apple iPhone 17 Pro"
-- "GTA 6 official screenshot"
-- "Samsung Galaxy S26 Ultra"
+- "NVIDIA Blackwell B200 GPU chip render"
+- "Apple iPhone 17 Pro hands on review"  
+- "GTA 6 gameplay screenshot trailer"
+- "Samsung Galaxy S26 Ultra device photo"
+- "Google Gemini Spark AI assistant interface mockup"
+- "Sony PlayStation 6 console design concept"
+
+❌ أمثلة سيئة (تجلب شعارات فقط):
+- "Google" → سيجلب شعار G كبير
+- "Apple" → سيجلب التفاحة فقط
+- "OpenAI" → سيجلب شعار فقط
+
+أضف دائماً كلمات مثل: device, photo, screenshot, render, hands-on, review, gameplay
 
 أنتج JSON فقط (بدون code fences):
 
