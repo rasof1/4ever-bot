@@ -1,8 +1,5 @@
 """
 News Scout — Uses Google Gemini (FREE tier) with Google Search grounding.
-Free: 1,500 RPD / 10 RPM on gemini-2.0-flash (with retries for 429).
-
-Get a free key: https://aistudio.google.com/app/apikey
 """
 
 import os
@@ -13,10 +10,11 @@ import requests
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not set. Get free at https://aistudio.google.com/app/apikey")
+    raise RuntimeError("GEMINI_API_KEY not set")
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+
 
 PROMPT_TEMPLATE = """أنت كاتب محتوى تقني لصفحة عربية "4Ever".
 
@@ -73,6 +71,7 @@ def scout_news(extra_instructions="", max_retries=3):
             r = requests.post(url, json=body, timeout=90)
             if r.status_code == 429:
                 wait = 30 * (attempt + 1)
+                last_err = RuntimeError(f"Gemini rate limited (429) on attempt {attempt+1}")
                 print(f"⏳ Rate limited, waiting {wait}s...")
                 time.sleep(wait)
                 continue
@@ -88,7 +87,7 @@ def scout_news(extra_instructions="", max_retries=3):
 
             if not text:
                 finish = cand.get("finishReason", "")
-                raise RuntimeError(f"No text returned (finish: {finish}): {cand}")
+                raise RuntimeError(f"No text (finish: {finish})")
 
             result = extract_json(text)
 
@@ -102,6 +101,9 @@ def scout_news(extra_instructions="", max_retries=3):
             if attempt < max_retries - 1:
                 time.sleep(10)
 
+    # Always raise a real exception, never None
+    if last_err is None:
+        raise RuntimeError("Gemini failed after all retries (unknown error)")
     raise last_err
 
 
@@ -128,7 +130,7 @@ def scout_multiple(count):
     avoid = []
     for i in range(count):
         if i > 0:
-            time.sleep(8)  # ~10 RPM = 6s gap is safe with buffer
+            time.sleep(8)
         extra = ""
         if avoid:
             extra = f"تجنّب هذه المواضيع: {', '.join(avoid)}. خبر مختلف."
