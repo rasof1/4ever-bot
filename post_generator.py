@@ -268,38 +268,62 @@ def draw_live_badge(canvas, gx, gy, tw, th, text):
 
 
 # ─── Headline ───────────────────────────────────────────────────
+def fit_text_to_width(draw, text, max_width, max_font_size, min_font_size=24, font_name="Cairo.ttf", is_ar=True):
+    """Find largest font size that fits text within max_width."""
+    for size in range(max_font_size, min_font_size - 1, -2):
+        f = load_font(font_name, size)
+        if is_ar:
+            bb = draw.textbbox((0, 0), text, font=f, language="ar", direction="rtl")
+        else:
+            bb = draw.textbbox((0, 0), text, font=f)
+        w = bb[2] - bb[0]
+        if w <= max_width:
+            return f, size
+    return load_font(font_name, min_font_size), min_font_size
+
+
 def draw_headline(canvas, gy, th, headline):
     draw = ImageDraw.Draw(canvas, "RGBA")
     W = canvas.size[0]
-    font = load_font("Cairo.ttf", headline.get("font_size", 44))
+    max_text_width = W - 100  # 50px margin each side
     accent = headline.get("highlight_color", "#00d4ff")
     line1 = headline["line1"]
     line2_ar = headline.get("line2_arabic", "")
     line2_en = headline.get("line2_english", "").strip()
 
-    bb1 = measure_ar(draw, line1, font)
+    base_size = headline.get("font_size", 44)
+
+    # 🎯 Auto-fit line 1
+    font1, size1 = fit_text_to_width(draw, line1, max_text_width, base_size, min_font_size=22)
+    bb1 = measure_ar(draw, line1, font1)
     w1, h1 = bb1[2] - bb1[0], bb1[3] - bb1[1]
     fy = gy + th + 50
     x1 = (W - w1) // 2
-    draw_text_shadow(draw, (x1, fy), line1, font, (255, 255, 255, 255), is_ar=True)
+    draw_text_shadow(draw, (x1, fy), line1, font1, (255, 255, 255, 255), is_ar=True)
 
     line2_y = fy + h1 + 32
     if line2_ar:
         if line2_en:
-            bb2 = measure_ar(draw, line2_ar, font)
-            bb_en = draw.textbbox((0, 0), line2_en, font=font)
+            # Auto-fit BOTH parts together
+            combined_text = f"{line2_en}  {line2_ar}"  # rough measure
+            font2, size2 = fit_text_to_width(draw, combined_text, max_text_width, base_size, min_font_size=22)
+            bb2 = measure_ar(draw, line2_ar, font2)
+            bb_en = draw.textbbox((0, 0), line2_en, font=font2)
             w2, en_w = bb2[2] - bb2[0], bb_en[2] - bb_en[0]
             gap = 18
             x_start = (W - (w2 + gap + en_w)) // 2
-            draw_text_shadow(draw, (x_start, line2_y), line2_en, font, hex_to_rgba(accent))
+            draw_text_shadow(draw, (x_start, line2_y), line2_en, font2, hex_to_rgba(accent))
             draw_text_shadow(draw, (x_start + en_w + gap, line2_y),
-                             line2_ar, font, (255, 255, 255, 255), is_ar=True)
+                             line2_ar, font2, (255, 255, 255, 255), is_ar=True)
+            line_height = bb2[3] - bb2[1]
         else:
-            bb2 = measure_ar(draw, line2_ar, font)
+            font2, _ = fit_text_to_width(draw, line2_ar, max_text_width, base_size, min_font_size=22)
+            bb2 = measure_ar(draw, line2_ar, font2)
             x2 = (W - (bb2[2] - bb2[0])) // 2
-            draw_text_shadow(draw, (x2, line2_y), line2_ar, font,
+            draw_text_shadow(draw, (x2, line2_y), line2_ar, font2,
                              (255, 255, 255, 255), is_ar=True)
-        return line2_y + h1 + 36
+            line_height = bb2[3] - bb2[1]
+        return line2_y + line_height + 36
     return fy + h1 + 36
 
 

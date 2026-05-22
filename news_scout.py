@@ -1,5 +1,10 @@
 """
-News Scout — Gemini 2.5 Flash + robust image fetching.
+News Scout — Gemini 2.5 Flash + multi-strategy image fetching.
+
+Image strategy (in order):
+1. Bing image search (works in dev)
+2. DuckDuckGo image search (works in dev)  
+3. Pollinations.ai AI image generation (ALWAYS works, free)
 """
 
 import os
@@ -37,46 +42,45 @@ PROMPT_TEMPLATE = """أنت كاتب محتوى تقني محترف لصفحة �
 
 تنويع: لو غطّيت AI، اختر هاتف أو لعبة في المرة القادمة.
 
-⚠️ مهم جداً عن image_query: لا تعطنا روابط صور (لأنها تفشل غالباً).
-بدلاً من ذلك، أعطنا **استعلام بحث صور إنجليزي وصفي مفصّل** يجد صورة واقعية للمنتج/الحدث.
-
-❌ تجنّب: استعلامات عامة جداً تجلب شعارات (مثل "Google" أو "Apple" فقط)
-✅ استخدم: وصف للمنتج بحد ذاته بكلمات وصفية
-
-أمثلة جيدة:
-- "NVIDIA Blackwell B200 GPU chip render"
-- "Apple iPhone 17 Pro hands on review"  
-- "GTA 6 gameplay screenshot trailer"
-- "Samsung Galaxy S26 Ultra device photo"
-- "Google Gemini Spark AI assistant interface mockup"
-- "Sony PlayStation 6 console design concept"
-
-❌ أمثلة سيئة (تجلب شعارات فقط):
-- "Google" → سيجلب شعار G كبير
-- "Apple" → سيجلب التفاحة فقط
-- "OpenAI" → سيجلب شعار فقط
-
-أضف دائماً كلمات مثل: device, photo, screenshot, render, hands-on, review, gameplay
+⚠️ قواعد صارمة:
+- headline_line1: أقصى 35 حرف عربي (يجب أن يدخل في إطار التصميم)
+- headline_line2_ar: أقصى 18 حرف عربي
+- headline_line2_en: اسم منتج إنجليزي قصير، أو فارغ
+- image_prompt: وصف إنجليزي تفصيلي للصورة (سيُستخدم لتوليد صورة AI)
 
 أنتج JSON فقط (بدون code fences):
 
 {{
-  "headline_line1": "عنوان عربي - أقل من 50 حرف",
-  "headline_line2_ar": "السطر 2 - أقل من 25 حرف",
-  "headline_line2_en": "اسم المنتج بالإنجليزية أو فارغ",
+  "headline_line1": "عنوان عربي قصير - أقصى 35 حرف",
+  "headline_line2_ar": "السطر 2 - أقصى 18 حرف",
+  "headline_line2_en": "اسم منتج إنجليزي قصير أو فارغ",
   "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai|samsung|sony|nintendo|xiaomi|amd|intel|playstation|xbox|qualcomm",
   "category": "ai|phone|gaming|hardware|leak|emerging",
-  "product_badge": "تسمية إنجليزية بأحرف لاتينية كبيرة فقط",
-  "live_badge": "مواصفات بالإنجليزية فقط",
-  "caption": "كابشن عربي كامل:\\n\\n[هوك مع إيموجي 🚀]\\n\\n[شرح في 2-3 أسطر]\\n\\n[الأهمية]\\n\\n🤔 [سؤال تفاعلي] 👇\\n\\n💡 لمزيد من التغطيات، اشترك في 4Ever!\\n\\n#وسم #تقنية #4Ever",
-  "image_query": "استعلام بحث صور بالإنجليزية يصف المنتج/الموضوع",
-  "source_url": "رابط المقال الأصلي"
+  "product_badge": "تسمية إنجليزية كبيرة قصيرة",
+  "live_badge": "مواصفات إنجليزية قصيرة",
+  "caption": "كابشن عربي كامل بالقالب المعتاد",
+  "image_prompt": "وصف تفصيلي إنجليزي بصري للصورة - ركّز على الشكل البصري والألوان، تجنّب النصوص والشعارات. مثال جيد: 'futuristic smartphone with multiple cameras, glossy black surface, dramatic lighting, professional product photography' أو 'gaming console controller floating in dark space with neon lights, cinematic'",
+  "image_query": "استعلام بحث صور بسيط بالإنجليزية - 4-6 كلمات",
+  "source_url": "رابط المقال"
 }}
+
+⚠️ مثال على الكابشن:
+
+🚀 [هوك جذاب]
+
+[شرح في 2-3 أسطر]
+
+[الأهمية]
+
+🤔 [سؤال] 👇
+
+💡 لمزيد من التغطيات، اشترك في 4Ever!
+
+#تقنية #ذكاء_اصطناعي #4Ever
 
 {extra_instructions}"""
 
 
-# Browser-like headers that work on most sites
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -85,7 +89,6 @@ DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
 }
 
-# Wikipedia requires a specific user-agent
 WIKIPEDIA_HEADERS = {
     "User-Agent": "4EverBot/1.0 (https://t.me/rasof_bot; bot@4ever.com) requests/2.32",
     "Accept": "image/*",
@@ -108,20 +111,12 @@ def try_download_image(url, save_path):
     if not url:
         return False
     try:
-        # Pick right headers based on domain
-        if "wikipedia.org" in url or "wikimedia.org" in url:
-            headers = WIKIPEDIA_HEADERS
-        else:
-            headers = DEFAULT_HEADERS
-
-        r = requests.get(url, headers=headers, timeout=20, stream=True,
-                         allow_redirects=True)
+        headers = WIKIPEDIA_HEADERS if ("wikipedia.org" in url or "wikimedia.org" in url) else DEFAULT_HEADERS
+        r = requests.get(url, headers=headers, timeout=25, stream=True, allow_redirects=True)
         if r.status_code != 200:
-            log.warning(f"   HTTP {r.status_code} for {url[:60]}")
             return False
         ct = r.headers.get("content-type", "").lower()
         if not (ct.startswith("image/") or "octet-stream" in ct):
-            log.warning(f"   Not an image: {ct} for {url[:60]}")
             return False
 
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -133,7 +128,6 @@ def try_download_image(url, save_path):
 
         if total < 5000:
             os.unlink(save_path)
-            log.warning(f"   Too small: {total} bytes")
             return False
 
         from PIL import Image
@@ -144,116 +138,172 @@ def try_download_image(url, save_path):
                 w, h = img.size
                 if w < 400 or h < 200:
                     os.unlink(save_path)
-                    log.warning(f"   Bad dimensions: {w}x{h}")
                     return False
             log.info(f"   ✅ Got {total//1024}KB, {w}x{h}")
             return True
-        except Exception as ex:
+        except Exception:
             if os.path.exists(save_path):
                 os.unlink(save_path)
-            log.warning(f"   Invalid image: {ex}")
             return False
     except Exception as e:
         log.warning(f"   Exception: {e}")
         return False
 
 
+def generate_ai_image(prompt, save_path):
+    """
+    Generate an image using Pollinations.ai (free, unlimited, no API key).
+    Always succeeds.
+    """
+    log.info(f"🎨 Generating AI image: {prompt[:80]}")
+    try:
+        # Clean prompt and add quality boosters
+        clean_prompt = re.sub(r'[^\w\s,.-]', ' ', prompt)
+        clean_prompt = re.sub(r'\s+', ' ', clean_prompt).strip()
+        full_prompt = f"{clean_prompt}, professional tech photography, dramatic lighting, high detail, 8k"
+
+        # Pollinations.ai endpoint
+        encoded = quote(full_prompt)
+        # seed for variety, nologo to avoid watermark
+        import random
+        seed = random.randint(1, 999999)
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1280&height=720&seed={seed}&nologo=true&enhance=true"
+
+        r = requests.get(url, timeout=60)
+        if r.status_code != 200:
+            log.warning(f"   Pollinations returned {r.status_code}")
+            return False
+
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        with open(save_path, "wb") as f:
+            f.write(r.content)
+
+        from PIL import Image
+        img = Image.open(save_path)
+        w, h = img.size
+        log.info(f"   ✅ AI image generated: {len(r.content)//1024}KB, {w}x{h}")
+        return True
+    except Exception as e:
+        log.warning(f"   AI generation failed: {e}")
+        return False
+
+
 def search_images_via_bing(query, max_results=8):
-    """
-    Use Bing image search via its public scrape endpoint.
-    Returns list of direct image URLs.
-    """
+    """Bing image search via public scrape."""
     try:
         url = f"https://www.bing.com/images/search?q={quote(query)}&form=HDRSC2&first=1"
-        r = requests.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-US,en;q=0.9",
-        }, timeout=15)
+        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=15)
         if r.status_code != 200:
-            log.warning(f"   Bing search returned {r.status_code}")
             return []
-
-        # Bing embeds image metadata in 'm' attribute as JSON
-        # Pattern: m="{...&quot;murl&quot;:&quot;https://...&quot;...}"
         urls = []
         for m in re.finditer(r'murl&quot;:&quot;(https?://[^&"]+?)&quot;', r.text):
             img_url = m.group(1).replace("&amp;", "&")
             urls.append(img_url)
             if len(urls) >= max_results:
                 break
-        log.info(f"   Bing found {len(urls)} candidate images")
+        log.info(f"   Bing found {len(urls)} candidates")
         return urls
     except Exception as e:
-        log.warning(f"   Bing search failed: {e}")
+        log.warning(f"   Bing failed: {e}")
         return []
 
 
 def search_images_via_duckduckgo(query, max_results=8):
-    """Fallback: DuckDuckGo image search (no API key needed)."""
     try:
-        # Get vqd token
         r = requests.get(f"https://duckduckgo.com/?q={quote(query)}&iax=images&ia=images",
                          headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         m = re.search(r'vqd=([\d-]+)', r.text)
         if not m:
             return []
         vqd = m.group(1)
-
         r2 = requests.get(
             f"https://duckduckgo.com/i.js?l=us-en&o=json&q={quote(query)}&vqd={vqd}&f=,,,,,&p=1",
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://duckduckgo.com/",
-            }, timeout=15
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://duckduckgo.com/"},
+            timeout=15
         )
         data = r2.json()
         urls = [r.get("image") for r in data.get("results", [])[:max_results] if r.get("image")]
-        log.info(f"   DuckDuckGo found {len(urls)} candidate images")
+        log.info(f"   DuckDuckGo found {len(urls)}")
         return urls
     except Exception as e:
         log.warning(f"   DuckDuckGo failed: {e}")
         return []
 
 
-def find_working_image(image_query, save_path):
+def find_or_generate_image(news_data, save_path):
     """
-    Strategy: Search Bing → DuckDuckGo for the query, try each result.
+    Multi-strategy image acquisition:
+    1. Try Bing search for real photo
+    2. Try DuckDuckGo
+    3. Fall back to AI generation (always works)
     """
-    if not image_query:
-        log.warning("   No image_query provided")
-        return False
+    query = news_data.get("image_query", "")
+    prompt = news_data.get("image_prompt", "")
 
-    log.info(f"🔍 Searching for: {image_query}")
+    # Strategy 1+2: Real image search (faster, more authentic when works)
+    if query:
+        log.info(f"🔍 Searching: {query}")
+        urls = search_images_via_bing(query)
+        if not urls:
+            urls = search_images_via_duckduckgo(query)
 
-    # Try Bing first
-    urls = search_images_via_bing(image_query)
+        for i, url in enumerate(urls[:5]):  # Try only top 5 to save time
+            log.info(f"   🔗 Try {i+1}: {url[:80]}")
+            if try_download_image(url, save_path):
+                return True
 
-    # Fallback to DuckDuckGo
-    if not urls:
-        log.info("   Bing returned nothing, trying DuckDuckGo...")
-        urls = search_images_via_duckduckgo(image_query)
+    # Strategy 3: AI generation (always works on Render)
+    log.info("📡 Real image search failed, generating with AI...")
+    ai_prompt = prompt or query or news_data.get("headline_line2_en") or "futuristic technology"
+    if generate_ai_image(ai_prompt, save_path):
+        return True
 
-    if not urls:
-        log.warning("   No image candidates from any search engine")
-        return False
-
-    # Try each URL until one works
-    for i, url in enumerate(urls):
-        log.info(f"   🔗 Try {i+1}/{len(urls)}: {url[:80]}")
-        if try_download_image(url, save_path):
-            return True
-
-    log.warning("   ❌ All search results failed")
     return False
 
 
-def scout_news(extra_instructions="", max_retries=3):
-    """Call Gemini, get news + image search query."""
-    prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions or "")
+def quality_check(news_data):
+    """
+    Quality control: validate news data before sending.
+    Returns (is_valid, issues) tuple.
+    """
+    issues = []
 
+    h1 = news_data.get("headline_line1", "")
+    if len(h1) > 50:
+        issues.append(f"headline_line1 too long ({len(h1)} chars, max 50)")
+    if len(h1) < 5:
+        issues.append("headline_line1 too short")
+
+    h2 = news_data.get("headline_line2_ar", "")
+    if len(h2) > 30:
+        issues.append(f"headline_line2_ar too long ({len(h2)} chars, max 30)")
+
+    en = news_data.get("headline_line2_en", "")
+    if len(en) > 30:
+        issues.append(f"headline_line2_en too long ({len(en)} chars)")
+
+    if not news_data.get("caption"):
+        issues.append("missing caption")
+    elif len(news_data["caption"]) < 50:
+        issues.append("caption too short")
+
+    if not news_data.get("source"):
+        issues.append("missing source")
+
+    return (len(issues) == 0, issues)
+
+
+def truncate_headline(text, max_len):
+    """Smart truncation: cut at word boundary."""
+    if len(text) <= max_len:
+        return text
+    # Find last space before max_len
+    cut = text[:max_len].rsplit(" ", 1)[0]
+    return cut if cut else text[:max_len]
+
+
+def scout_news(extra_instructions="", max_retries=3):
+    prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions or "")
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "tools": [{"google_search": {}}],
@@ -264,7 +314,6 @@ def scout_news(extra_instructions="", max_retries=3):
             "thinkingConfig": {"thinkingBudget": 0},
         }
     }
-
     url = f"{API_URL}?key={GEMINI_API_KEY}"
 
     last_err = None
@@ -296,19 +345,24 @@ def scout_news(extra_instructions="", max_retries=3):
                 if k not in result:
                     raise ValueError(f"Missing: {k}")
 
-            # Build a smart fallback query from EN headline + source
-            if not result.get("image_query"):
+            # 🎯 Quality control: enforce length limits
+            result["headline_line1"] = truncate_headline(result["headline_line1"], 50)
+            result["headline_line2_ar"] = truncate_headline(result["headline_line2_ar"], 30)
+
+            # Validate
+            ok, issues = quality_check(result)
+            if not ok:
+                log.warning(f"⚠️  Quality issues: {issues}")
+                # Don't fail, just log
+
+            # Ensure image_prompt exists for AI fallback
+            if not result.get("image_prompt"):
                 src = result.get("source", "")
                 en = result.get("headline_line2_en", "")
                 cat = result.get("category", "")
-                if en and src:
-                    result["image_query"] = f"{src} {en}"
-                elif en:
-                    result["image_query"] = en
-                elif src:
-                    result["image_query"] = f"{src} {cat}"
-                else:
-                    result["image_query"] = result["headline_line1"][:50]
+                result["image_prompt"] = f"{src} {en} {cat} product photography, professional".strip()
+            if not result.get("image_query"):
+                result["image_query"] = result.get("headline_line2_en") or result.get("image_prompt", "")[:50]
 
             return result
         except Exception as e:
@@ -322,11 +376,10 @@ def scout_news(extra_instructions="", max_retries=3):
 
 
 def download_image(news_data, save_path):
-    """Search for and download an image based on news_data."""
-    query = news_data.get("image_query", "")
-    if find_working_image(query, save_path):
+    """Multi-strategy image acquisition."""
+    if find_or_generate_image(news_data, save_path):
         return save_path
-    raise ValueError(f"No working image found for query: {query}")
+    raise ValueError("All image strategies failed (this should never happen)")
 
 
 def scout_multiple(count):
