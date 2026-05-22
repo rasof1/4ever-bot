@@ -1,5 +1,6 @@
 """
-News Scout — Uses Google Gemini (FREE tier) with Google Search grounding.
+News Scout — Uses Google Gemini 2.5 Flash (FREE tier) with Google Search.
+Thinking disabled to prevent token exhaustion.
 """
 
 import os
@@ -12,13 +13,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not set")
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+# 2.5-flash has higher free quota AND supports grounding
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
 
 
-PROMPT_TEMPLATE = """أنت كاتب محتوى تقني لصفحة عربية "4Ever".
+PROMPT_TEMPLATE = """أنت كاتب محتوى تقني محترف لصفحة عربية "4Ever".
 
-ابحث في الإنترنت عن آخر خبر تقني/AI من آخر 7 أيام.
+ابحث في الإنترنت عن آخر خبر تقني/AI مهم وحديث من آخر 7 أيام.
 أولوية: OpenAI, Anthropic, Google, Meta, Microsoft, Apple, NVIDIA, xAI, GitHub.
 
 أنتج JSON صارم فقط (بدون code fences، بدون نص قبل/بعد):
@@ -50,7 +52,7 @@ def extract_json(text):
 
 
 def scout_news(extra_instructions="", max_retries=3):
-    """Call Gemini with Google Search. Retries on 429 with backoff."""
+    """Call Gemini 2.5 Flash with Google Search (thinking disabled)."""
     prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions or "")
 
     body = {
@@ -60,6 +62,7 @@ def scout_news(extra_instructions="", max_retries=3):
             "temperature": 0.9,
             "topP": 0.95,
             "maxOutputTokens": 4096,
+            "thinkingConfig": {"thinkingBudget": 0},  # Critical: prevents MAX_TOKENS
         }
     }
 
@@ -70,16 +73,19 @@ def scout_news(extra_instructions="", max_retries=3):
         try:
             r = requests.post(url, json=body, timeout=90)
             if r.status_code == 429:
-                wait = 30 * (attempt + 1)
-                last_err = RuntimeError(f"Gemini rate limited (429) on attempt {attempt+1}")
-                print(f"⏳ Rate limited, waiting {wait}s...")
+                last_err = RuntimeError(
+                    f"Gemini rate limited. Try again later or switch model "
+                    f"(attempt {attempt+1}/{max_retries})"
+                )
+                wait = 20 * (attempt + 1)
+                print(f"⏳ 429 rate limit, waiting {wait}s...")
                 time.sleep(wait)
                 continue
             r.raise_for_status()
             data = r.json()
 
             if "candidates" not in data or not data["candidates"]:
-                raise RuntimeError(f"Empty response: {data}")
+                raise RuntimeError(f"Empty response: {str(data)[:300]}")
 
             cand = data["candidates"][0]
             parts = cand.get("content", {}).get("parts", [])
@@ -87,7 +93,7 @@ def scout_news(extra_instructions="", max_retries=3):
 
             if not text:
                 finish = cand.get("finishReason", "")
-                raise RuntimeError(f"No text (finish: {finish})")
+                raise RuntimeError(f"No text returned (finish: {finish})")
 
             result = extract_json(text)
 
@@ -99,11 +105,10 @@ def scout_news(extra_instructions="", max_retries=3):
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
-                time.sleep(10)
+                time.sleep(5)
 
-    # Always raise a real exception, never None
     if last_err is None:
-        raise RuntimeError("Gemini failed after all retries (unknown error)")
+        raise RuntimeError("Gemini failed after all retries")
     raise last_err
 
 
@@ -112,11 +117,9 @@ def download_image(url, save_path):
     headers = {"User-Agent": "Mozilla/5.0 (4EverBot/1.0)"}
     r = requests.get(url, headers=headers, timeout=30, stream=True, allow_redirects=True)
     r.raise_for_status()
-
     ct = r.headers.get("content-type", "")
     if not ct.startswith("image/"):
         raise ValueError(f"Not an image (got {ct})")
-
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     with open(save_path, "wb") as f:
         for chunk in r.iter_content(8192):
@@ -125,12 +128,11 @@ def download_image(url, save_path):
 
 
 def scout_multiple(count):
-    """Generate N distinct news items, with delays to respect rate limits."""
     results = []
     avoid = []
     for i in range(count):
         if i > 0:
-            time.sleep(8)
+            time.sleep(6)
         extra = ""
         if avoid:
             extra = f"تجنّب هذه المواضيع: {', '.join(avoid)}. خبر مختلف."
