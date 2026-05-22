@@ -40,6 +40,8 @@ PORT = int(os.getenv("PORT", "10000"))
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 MAX_POSTS = 5
 ROOT = Path(__file__).parent
+OUTPUT_DIR = ROOT / "output"
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 def base_config(main_image_path, news):
