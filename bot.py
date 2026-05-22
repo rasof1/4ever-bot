@@ -206,17 +206,16 @@ async def generate_and_send_one(update, idx, total):
 
         with open(out_path, "rb") as f:
             await update.message.reply_photo(photo=f, caption=short_caption)
+            # Note: caption sent without parse_mode to avoid Telegram entity errors
 
         if len(caption) > 1024:
-            await update.message.reply_text(
-                f"📝 *الكابشن الكامل:*\n\n{caption}",
-                parse_mode="Markdown"
-            )
+            # Send full caption WITHOUT markdown to avoid entity parse errors
+            await update.message.reply_text(f"📝 الكابشن الكامل:\n\n{caption}")
 
         if news.get("source_url"):
             await update.message.reply_text(
-                f"🔗 *المصدر:* {news['source_url']}",
-                parse_mode="Markdown", disable_web_page_preview=True
+                f"🔗 المصدر: {news['source_url']}",
+                disable_web_page_preview=True
             )
 
         await progress.delete()
