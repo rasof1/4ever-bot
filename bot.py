@@ -177,15 +177,12 @@ async def generate_and_send_one(update, idx, total):
                                          dir=ROOT / "output") as tmp:
             img_path = tmp.name
         try:
-            await loop.run_in_executor(None, download_image,
-                                       news["image_url"], img_path)
+            await loop.run_in_executor(None, download_image, news, img_path)
         except Exception as e:
             logger.warning(f"Image download failed: {e}, using branded placeholder")
             from PIL import Image, ImageDraw, ImageFilter
-            # Create a nice gradient placeholder with 4Ever branding hint
             img = Image.new("RGB", (1280, 720), (15, 15, 35))
             d = ImageDraw.Draw(img)
-            # Add gradient circles
             for r in range(400, 0, -20):
                 alpha = int(50 * (r / 400))
                 d.ellipse((640 - r, 360 - r, 640 + r, 360 + r),

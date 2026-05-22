@@ -171,9 +171,23 @@ SOURCE_LOGOS = {
     "microsoft": {"text": "Microsoft", "colors": [(243, 83, 37), (129, 188, 6),
                                                   (5, 166, 240), (255, 186, 8),
                                                   (115, 115, 115)] * 2},
-    "apple": {"text": "Apple", "colors": [(255, 255, 255)] * 5},
+    "apple": {"text": "Apple", "colors": [(40, 40, 40)] * 5},
     "nvidia": {"text": "NVIDIA", "colors": [(118, 185, 0)] * 6},
     "xai": {"text": "xAI", "colors": [(0, 0, 0)] * 3},
+    # Phones
+    "samsung": {"text": "SAMSUNG", "colors": [(20, 40, 160)] * 7},
+    "xiaomi": {"text": "Xiaomi", "colors": [(255, 103, 0)] * 6},
+    "oneplus": {"text": "OnePlus", "colors": [(235, 12, 35)] * 7},
+    # Gaming
+    "sony": {"text": "SONY", "colors": [(0, 0, 0)] * 4},
+    "playstation": {"text": "PlayStation", "colors": [(0, 55, 145)] * 11},
+    "xbox": {"text": "Xbox", "colors": [(16, 124, 16)] * 4},
+    "nintendo": {"text": "Nintendo", "colors": [(229, 9, 20)] * 8},
+    "steam": {"text": "Steam", "colors": [(23, 26, 33)] * 5},
+    # Hardware
+    "amd": {"text": "AMD", "colors": [(237, 28, 36)] * 3},
+    "intel": {"text": "Intel", "colors": [(0, 113, 197)] * 5},
+    "qualcomm": {"text": "Qualcomm", "colors": [(225, 27, 34)] * 8},
 }
 
 
