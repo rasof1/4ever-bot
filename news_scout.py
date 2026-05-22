@@ -35,8 +35,8 @@ PROMPT_TEMPLATE = """أنت كاتب محتوى تقني محترف لصفحة �
   "headline_line2_ar": "السطر 2 العربي - أقل من 25 حرف",
   "headline_line2_en": "اسم المنتج بالإنجليزية أو فارغ",
   "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai",
-  "product_badge": "مثل: GPT-5 • REASONING MODEL",
-  "live_badge": "مثل: GPT-5 • 200B • LIVE",
+  "product_badge": "تسمية إنجليزية بأحرف لاتينية كبيرة فقط، لا عربية ولا إيموجي - مثل: GPT-5 • REASONING MODEL أو APPLE INTELLIGENCE • ACCESSIBILITY",
+  "live_badge": "مواصفات بالإنجليزية فقط لا عربية - مثل: GPT-5 • 200B • LIVE أو IOS 18 • LIVE",
   "caption": "كابشن عربي كامل بهذا القالب:\\n\\n[هوك مع إيموجي 🚀]\\n\\n[شرح في 2-3 أسطر]\\n\\n[الأهمية]\\n\\n🤔 [سؤال] 👇\\n\\n💡 لمزيد من التغطيات، اشترك في 4Ever!\\n\\n#وسم #ذكاء_اصطناعي #4Ever",
   "source_url": "رابط مقال حقيقي يمكن فتحه (مهم جداً)"
 }}

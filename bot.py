@@ -71,12 +71,12 @@ def base_config(main_image_path, news):
         "source_logo": {"type": news.get("source", "google")},
         "trend_indicator": {"show": True, "color": "#10b981"},
         "live_badge": {
-            "show": bool(news.get("live_badge")),
-            "text": news.get("live_badge", ""),
+            "show": bool(sanitize_badge(news.get("live_badge", ""))),
+            "text": sanitize_badge(news.get("live_badge", "")),
         },
         "product_badge": {
-            "show": bool(news.get("product_badge")),
-            "text": news.get("product_badge", ""),
+            "show": bool(sanitize_badge(news.get("product_badge", ""))),
+            "text": sanitize_badge(news.get("product_badge", "")),
         },
         "socials": {"show": True, "icons": ["facebook", "instagram", "x"]},
         "decorations": {"corner_brackets": True, "decorative_line": True},
@@ -130,6 +130,18 @@ async def cmd_status(update, ctx):
         "• الإصدار: 1.0.0"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+
+
+def sanitize_badge(text):
+    """Keep only ASCII letters/digits/spaces/dots/bullets for English-only fonts."""
+    if not text:
+        return ""
+    # Keep ASCII letters, digits, common punctuation, and bullet chars
+    cleaned = re.sub(r"[^\x20-\x7E•·]", "", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def parse_count(text):
