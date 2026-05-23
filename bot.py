@@ -19,6 +19,7 @@ from telegram.ext import (
 from post_generator import generate_post
 from news_scout import (
     scout_news, download_image, reverse_scout, fetch_url_content,
+    acquire_validated_image,
 )
 
 logging.basicConfig(
@@ -140,18 +141,22 @@ def parse_count(text):
 
 
 async def render_and_send_post(update, news, idx, total, progress):
-    """Take a news dict and render it then send to user."""
+    """Take a news dict and render it then send to user.
+    Uses AI-validated image acquisition + sends full caption."""
     loop = asyncio.get_event_loop()
-    await progress.edit_text(f"🔄 ({idx}/{total}) - جاري الحصول على الصورة...")
+    await progress.edit_text(f"🔄 ({idx}/{total}) - جاري البحث عن الصورة المناسبة...")
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False,
                                      dir=str(OUTPUT_DIR)) as tmp:
         img_path = tmp.name
 
     try:
-        await loop.run_in_executor(None, download_image, news, img_path)
+        # 🔍 Smart image acquisition with AI validation
+        await loop.run_in_executor(None, acquire_validated_image, news, img_path, 3)
+        if not os.path.exists(img_path) or os.path.getsize(img_path) < 1000:
+            raise ValueError("No valid image acquired")
     except Exception as e:
-        logger.warning(f"Image acquisition failed: {e}, using gradient placeholder")
+        logger.warning(f"Image acquisition failed: {e}, using branded placeholder")
         from PIL import Image, ImageDraw, ImageFilter
         img = Image.new("RGB", (1280, 720), (15, 15, 35))
         d = ImageDraw.Draw(img)
@@ -169,14 +174,22 @@ async def render_and_send_post(update, news, idx, total, progress):
     await loop.run_in_executor(None, generate_post, cfg, out_path, idx)
 
     caption = news.get("caption", "")
-    short_caption = caption[:1020] + "..." if len(caption) > 1024 else caption
 
-    with open(out_path, "rb") as f:
-        await update.message.reply_photo(photo=f, caption=short_caption)
+    # 📸 Send image with short caption OR no caption if too long
+    if len(caption) <= 1024:
+        # Short caption fits in photo caption
+        with open(out_path, "rb") as f:
+            await update.message.reply_photo(photo=f, caption=caption)
+    else:
+        # Long caption - send photo first WITHOUT caption, then full text separately
+        with open(out_path, "rb") as f:
+            await update.message.reply_photo(photo=f)
+        # Send full caption as text message(s) - split if > 4096 (telegram limit)
+        for chunk_start in range(0, len(caption), 4000):
+            chunk = caption[chunk_start:chunk_start + 4000]
+            await update.message.reply_text(chunk)
 
-    if len(caption) > 1024:
-        await update.message.reply_text(f"📝 الكابشن الكامل:\n\n{caption}")
-
+    # Source link
     if news.get("source_url"):
         await update.message.reply_text(
             f"🔗 المصدر: {news['source_url']}",
