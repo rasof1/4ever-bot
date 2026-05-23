@@ -79,31 +79,101 @@ def add_star_particles(canvas, count=35, seed=4):
 
 # ─── Main asset ─────────────────────────────────────────────────
 def paste_main_asset(canvas, asset_path, target_w, radius, glow_color, glow_alpha):
+    """Fit the image in a safe zone — NEVER overlaps header, headline, or decorations.
+    
+    Safe zone layout (1080×1080 canvas):
+      ┌──────────────────────────┐
+      │ HEADER (0 - 160px)        │ ← socials + logo + corner brackets
+      ├──────────────────────────┤
+      │                            │
+      │   IMAGE ZONE              │ ← available: 160-660px (500px height)
+      │   (max 500px tall)        │
+      │                            │
+      ├──────────────────────────┤
+      │ HEADLINE (700-1000px)     │ ← 300px reserved for Arabic text
+      ├──────────────────────────┤
+      │ FOOTER decor (1000-1080)  │ ← corner brackets
+      └──────────────────────────┘
+    """
     img = Image.open(asset_path).convert("RGB")
-    target_h = int(img.height * (target_w / img.width))
-    img = img.resize((target_w, target_h), Image.LANCZOS)
     W, H = canvas.size
-    gx, gy = (W - target_w) // 2, (H - target_h) // 2 - 20
 
-    glow_size = 40
+    # 🎯 SAFE ZONE BOUNDARIES - hard limits to prevent overlap
+    SAFE_TOP = 175      # Below header
+    SAFE_BOTTOM = 680   # Above headline area (leaves 400px for headline + footer)
+    SAFE_WIDTH = int(W * 0.82)  # ~885px wide (matches headline width)
+
+    available_h = SAFE_BOTTOM - SAFE_TOP  # 505px
+    available_w = SAFE_WIDTH
+
+    # Compute aspect ratio
+    img_w, img_h = img.size
+    aspect = img_w / img_h
+
+    # Fit within safe zone (whichever dimension fills first)
+    # For tall images (portrait), height limits first
+    # For wide images (landscape), width limits first
+    if aspect >= 1.0:
+        # Landscape or square: try width first
+        fit_w = available_w
+        fit_h = int(fit_w / aspect)
+        if fit_h > available_h:
+            fit_h = available_h
+            fit_w = int(fit_h * aspect)
+    else:
+        # Portrait: prefer height-fitting
+        fit_h = available_h
+        fit_w = int(fit_h * aspect)
+        if fit_w > available_w:
+            fit_w = available_w
+            fit_h = int(fit_w / aspect)
+
+    # Resize using high-quality LANCZOS
+    img = img.resize((fit_w, fit_h), Image.LANCZOS)
+    target_w, target_h = fit_w, fit_h
+
+    # Center horizontally
+    gx = (W - target_w) // 2
+    # Center vertically WITHIN the safe zone
+    gy = SAFE_TOP + (available_h - target_h) // 2
+
+    # Safety clamp - should already be in safe zone but just in case
+    if gy < SAFE_TOP:
+        gy = SAFE_TOP
+    if gy + target_h > SAFE_BOTTOM:
+        gy = SAFE_BOTTOM - target_h
+
+    # 🎨 Enhanced glow effect with multi-layer blur
+    glow_size = 50
     glow = Image.new("RGBA",
                      (target_w + glow_size * 2, target_h + glow_size * 2),
                      (0, 0, 0, 0))
+    # Inner stronger glow
     ImageDraw.Draw(glow).rounded_rectangle(
         (glow_size, glow_size, glow_size + target_w, glow_size + target_h),
-        radius=radius + 8, fill=(*hex_to_rgb(glow_color), glow_alpha)
+        radius=radius + 8, fill=(*hex_to_rgb(glow_color), min(glow_alpha + 30, 255))
     )
-    glow = glow.filter(ImageFilter.GaussianBlur(20))
+    glow = glow.filter(ImageFilter.GaussianBlur(25))
     canvas.paste(glow, (gx - glow_size, gy - glow_size), glow)
 
+    # Rounded mask for image
     mask = Image.new("L", (target_w, target_h), 0)
     ImageDraw.Draw(mask).rounded_rectangle((0, 0, target_w, target_h), radius=radius, fill=255)
     canvas.paste(img, (gx, gy), mask)
 
-    ImageDraw.Draw(canvas).rounded_rectangle(
+    # 🎨 Enhanced border - double outline for depth
+    draw = ImageDraw.Draw(canvas)
+    # Outer subtle border
+    draw.rounded_rectangle(
         (gx - 3, gy - 3, gx + target_w + 3, gy + target_h + 3),
-        radius=radius + 3, outline=(255, 255, 255, 80), width=3
+        radius=radius + 3, outline=(255, 255, 255, 80), width=2
     )
+    # Inner highlight
+    draw.rounded_rectangle(
+        (gx + 1, gy + 1, gx + target_w - 1, gy + target_h - 1),
+        radius=radius - 1, outline=(255, 255, 255, 40), width=1
+    )
+
     return gx, gy, target_w, target_h
 
 
