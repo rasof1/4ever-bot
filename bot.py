@@ -129,7 +129,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 2.3.0 (مع رفع صورة مخصصة)"
+        "• الإصدار: 2.4 (لغات متعددة + فيديو)"
     )
     await update.message.reply_text(msg)
 
@@ -246,17 +246,18 @@ URL_PATTERN = re.compile(r'https?://[^\s]+')
 
 async def ask_about_language(message, ctx, callback_kind, payload):
     """Ask user which language for the upcoming post.
-    callback_kind: 'auto' | 'url' | 'text' | 'photo'
-    payload: dict with data needed to continue (e.g. {'url': '...'} or {'text': '...'})
+    callback_kind: 'auto' | 'url' | 'text' | 'photo_caption'
+    payload: dict with data needed to continue
     """
     user_id = message.from_user.id
 
-    # Store pending payload
+    # Store pending payload with chat_id (so we can reply in the right chat later)
     PENDING_NEWS[user_id] = {
         "kind": "lang_choice",
         "callback_kind": callback_kind,
         "payload": payload,
         "chat_id": message.chat_id,
+        "user_id": user_id,  # explicit
     }
 
     keyboard = [[
@@ -300,32 +301,33 @@ async def handle_language_choice(update, ctx):
 
     callback_kind = pending["callback_kind"]
     payload = pending["payload"]
+    chat_id = pending.get("chat_id")
     PENDING_NEWS.pop(user_id, None)
 
     lang_label = {"ar": "🇸🇦 العربية", "en": "🇬🇧 English", "fr": "🇫🇷 Français"}[lang]
     progress = query.message
     await progress.edit_text(f"✅ {lang_label}\n\n🔄 جاري التنفيذ...")
 
-    # Dispatch to appropriate handler based on what user originally sent
+    # 🎯 Pass user_id + chat_id explicitly to downstream functions
     try:
         if callback_kind == "auto":
             count = payload.get("count", 1)
             for i in range(1, count + 1):
-                await generate_and_send_one_with_lang(progress, i, count, lang)
+                await generate_and_send_one_with_lang(query.message, user_id, i, count, lang, ctx)
             if count > 1:
-                await progress.reply_text(f"✅ تم توليد {count} منشورات!")
+                await ctx.bot.send_message(chat_id=chat_id, text=f"✅ تم توليد {count} منشورات!")
         elif callback_kind == "url":
-            await execute_reverse_url(progress, payload["url"], payload["full_text"], lang)
+            await execute_reverse_url(query.message, user_id, payload["url"], payload["full_text"], lang, ctx)
         elif callback_kind == "text":
-            await execute_reverse_text(progress, payload["text"], lang)
+            await execute_reverse_text(query.message, user_id, payload["text"], lang, ctx)
         elif callback_kind == "photo_caption":
-            await execute_reverse_photo_caption(progress, payload["caption"], lang)
+            await execute_reverse_photo_caption(query.message, user_id, payload["caption"], lang, ctx)
     except Exception as e:
         logger.error(f"Lang dispatch failed: {e}\n{traceback.format_exc()}")
-        await progress.reply_text(f"❌ فشل: {str(e)[:200]}")
+        await ctx.bot.send_message(chat_id=chat_id, text=f"❌ فشل: {str(e)[:200]}")
 
 
-async def generate_and_send_one_with_lang(message, idx, total, lang):
+async def generate_and_send_one_with_lang(message, user_id, idx, total, lang, ctx):
     """Auto-mode generator with language."""
     progress = await message.reply_text(
         f"🔄 *جاري التوليد ({idx}/{total})...*\n🔍 البحث عن آخر ترند تقني...",
@@ -342,12 +344,10 @@ async def generate_and_send_one_with_lang(message, idx, total, lang):
         )
 
 
-async def execute_reverse_url(message, url, full_text, lang):
-    """Execute reverse URL with a chosen language."""
-    progress = await message.reply_text(
-        "📥 جاري قراءة الرابط...",
-        parse_mode="Markdown"
-    )
+async def execute_reverse_url(message, user_id, url, full_text, lang, ctx):
+    """Execute reverse URL with a chosen language. message=bot's progress message, user_id=original user."""
+    progress = await message.reply_text("📥 جاري قراءة الرابط...")
+    chat_id = message.chat_id
     try:
         loop = asyncio.get_event_loop()
         content_data = await loop.run_in_executor(None, fetch_url_content, url)
@@ -370,49 +370,50 @@ async def execute_reverse_url(message, url, full_text, lang):
 
         news = await loop.run_in_executor(None, reverse_scout, combined, lang)
         news["source_url"] = url
-        await ask_about_image(message, ctx_dummy_for_message(message), news, progress)
+        # ✅ Pass explicit user_id + chat_id (since message.from_user.id is the bot)
+        await ask_about_image(message, ctx, news, progress, user_id=user_id, chat_id=chat_id)
     except Exception as e:
         logger.error(f"Reverse URL failed: {e}\n{traceback.format_exc()}")
         await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
 
 
-async def execute_reverse_text(message, text, lang):
-    """Execute reverse text with a chosen language."""
+async def execute_reverse_text(message, user_id, text, lang, ctx):
     progress = await message.reply_text("🤖 جاري تحويل النص لمنشور...")
+    chat_id = message.chat_id
     try:
         loop = asyncio.get_event_loop()
         news = await loop.run_in_executor(None, reverse_scout, text, lang)
-        await ask_about_image(message, ctx_dummy_for_message(message), news, progress)
+        await ask_about_image(message, ctx, news, progress, user_id=user_id, chat_id=chat_id)
     except Exception as e:
         logger.error(f"Reverse text failed: {e}\n{traceback.format_exc()}")
         await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
 
 
-async def execute_reverse_photo_caption(message, caption, lang):
-    """Execute reverse with photo+caption."""
+async def execute_reverse_photo_caption(message, user_id, caption, lang, ctx):
     progress = await message.reply_text("🤖 جاري تحويل المحتوى لمنشور...")
+    chat_id = message.chat_id
     try:
         loop = asyncio.get_event_loop()
         prompt_text = f"Screenshot caption from user: {caption}\n\nGenerate a 4Ever post."
         news = await loop.run_in_executor(None, reverse_scout, prompt_text, lang)
-        await ask_about_image(message, ctx_dummy_for_message(message), news, progress)
+        await ask_about_image(message, ctx, news, progress, user_id=user_id, chat_id=chat_id)
     except Exception as e:
         logger.error(f"Photo+caption failed: {e}\n{traceback.format_exc()}")
         await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
 
 
-def ctx_dummy_for_message(message):
-    """Helper - we don't need ctx in newer functions."""
-    return None
-
-
-async def ask_about_image(message, ctx, news, progress):
-    """After news is generated, ask user if they have a custom image."""
-    user_id = message.from_user.id
+async def ask_about_image(message, ctx, news, progress, user_id=None, chat_id=None):
+    """After news is generated, ask user if they have a custom image.
+    user_id and chat_id must be explicit (since 'message' might be the bot's own message)."""
+    if user_id is None:
+        user_id = message.from_user.id
+    if chat_id is None:
+        chat_id = message.chat_id
 
     PENDING_NEWS[user_id] = {
         "news": news,
-        "chat_id": message.chat_id,
+        "chat_id": chat_id,
+        "user_id": user_id,
         "awaiting_image": False,
     }
 
@@ -729,7 +730,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v2.3...")
+    logger.info("🤖 Starting 4Ever Bot v2.4 (lang+video)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
