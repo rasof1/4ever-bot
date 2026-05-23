@@ -29,8 +29,19 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not set")
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+# Fallback chain - tries each model in order if previous gets rate-limited
+# Each has SEPARATE daily quota in Gemini Free Tier!
+FALLBACK_MODELS = [
+    "gemini-2.5-flash",        # Best quality, normal quota
+    "gemini-2.5-flash-lite",   # Cheaper, separate quota
+    "gemini-2.0-flash",        # Older, separate quota
+    "gemini-2.0-flash-lite",   # Cheapest, separate quota
+    "gemini-flash-latest",     # Latest pointer
+]
+# Allow override via env var (forces single model)
+_env_model = os.getenv("GEMINI_MODEL")
+if _env_model:
+    FALLBACK_MODELS = [_env_model] + [m for m in FALLBACK_MODELS if m != _env_model]
 
 log = logging.getLogger("news_scout")
 log.setLevel(logging.INFO)
@@ -366,8 +377,8 @@ def truncate_headline(text, max_len):
     return cut if cut else text[:max_len]
 
 
-def scout_news(extra_instructions="", max_retries=3):
-    prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions or "")
+def _call_gemini(prompt, body_overrides=None):
+    """Try each fallback model until one succeeds. Returns parsed JSON or raises."""
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "tools": [{"google_search": {}}],
@@ -378,65 +389,81 @@ def scout_news(extra_instructions="", max_retries=3):
             "thinkingConfig": {"thinkingBudget": 0},
         }
     }
-    url = f"{API_URL}?key={GEMINI_API_KEY}"
+    if body_overrides:
+        body.update(body_overrides)
 
     last_err = None
-    for attempt in range(max_retries):
+    for model_idx, model in enumerate(FALLBACK_MODELS):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
         try:
+            log.info(f"🤖 Trying model {model_idx+1}/{len(FALLBACK_MODELS)}: {model}")
             r = requests.post(url, json=body, timeout=90)
             if r.status_code == 429:
-                last_err = RuntimeError(f"Gemini rate limited (attempt {attempt+1})")
-                wait = 20 * (attempt + 1)
-                log.info(f"⏳ 429, waiting {wait}s...")
-                time.sleep(wait)
+                log.warning(f"   ⚠️  {model} rate limited, trying next...")
+                last_err = RuntimeError(f"{model} rate limited")
+                time.sleep(2)
+                continue
+            if r.status_code == 404:
+                log.warning(f"   ⚠️  {model} not found, trying next...")
+                last_err = RuntimeError(f"{model} not found")
                 continue
             r.raise_for_status()
             data = r.json()
-
             if "candidates" not in data or not data["candidates"]:
-                raise RuntimeError(f"Empty: {str(data)[:300]}")
-
+                last_err = RuntimeError(f"Empty response from {model}")
+                continue
             cand = data["candidates"][0]
             parts = cand.get("content", {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts)
-
             if not text:
-                raise RuntimeError(f"No text (finish: {cand.get('finishReason')})")
-
-            result = extract_json(text)
-
-            for k in ["headline_line1", "headline_line2_ar", "source", "caption"]:
-                if k not in result:
-                    raise ValueError(f"Missing: {k}")
-
-            # 🎯 Quality control: enforce length limits
-            result["headline_line1"] = truncate_headline(result["headline_line1"], 50)
-            result["headline_line2_ar"] = truncate_headline(result["headline_line2_ar"], 30)
-
-            # Validate
-            ok, issues = quality_check(result)
-            if not ok:
-                log.warning(f"⚠️  Quality issues: {issues}")
-                # Don't fail, just log
-
-            # Ensure image_prompt exists for AI fallback
-            if not result.get("image_prompt"):
-                src = result.get("source", "")
-                en = result.get("headline_line2_en", "")
-                cat = result.get("category", "")
-                result["image_prompt"] = f"{src} {en} {cat} product photography, professional".strip()
-            if not result.get("image_query"):
-                result["image_query"] = result.get("headline_line2_en") or result.get("image_prompt", "")[:50]
-
-            return result
+                last_err = RuntimeError(f"No text from {model} (finish: {cand.get('finishReason')})")
+                continue
+            log.info(f"   ✅ {model} responded ({len(text)} chars)")
+            return extract_json(text)
+        except RuntimeError:
+            raise
         except Exception as e:
             last_err = e
-            if attempt < max_retries - 1:
-                time.sleep(5)
+            log.warning(f"   {model} failed: {e}")
+            continue
 
     if last_err is None:
-        raise RuntimeError("Gemini failed after all retries")
-    raise last_err
+        raise RuntimeError("All Gemini models exhausted")
+    raise RuntimeError(f"All {len(FALLBACK_MODELS)} models failed. Last error: {last_err}")
+
+
+def scout_news(extra_instructions="", max_retries=1):
+    """Scout latest tech news. Tries multiple models on rate limit."""
+    prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions or "")
+
+    try:
+        result = _call_gemini(prompt)
+        # Stub to maintain old structure - we'll fall through to validation below
+        data_dummy = {"candidates": [{"content": {"parts": [{"text": "STUB"}]}}]}
+    except Exception as e:
+        raise
+
+    # Reframe for compat with rest of function
+    try:
+
+        for k in ["headline_line1", "headline_line2_ar", "source", "caption"]:
+            if k not in result:
+                raise ValueError(f"Missing: {k}")
+        result["headline_line1"] = truncate_headline(result["headline_line1"], 50)
+        result["headline_line2_ar"] = truncate_headline(result["headline_line2_ar"], 30)
+        ok, issues = quality_check(result)
+        if not ok:
+            log.warning(f"⚠️  Quality issues: {issues}")
+        if not result.get("image_prompt"):
+            src = result.get("source", "")
+            en = result.get("headline_line2_en", "")
+            cat = result.get("category", "")
+            result["image_prompt"] = f"{src} {en} {cat} product photography, professional".strip()
+        if not result.get("image_query"):
+            result["image_query"] = result.get("headline_line2_en") or result.get("image_prompt", "")[:50]
+        return result
+    except Exception as e:
+        raise
 
 
 def download_image(news_data, save_path):
@@ -500,96 +527,116 @@ REVERSE_PROMPT = """أنت محرر تقني محترف لصفحة عربية "4
 """
 
 
-def reverse_scout(user_content, max_retries=3):
-    """Convert user-provided content (URL, text, or scraped article) to 4Ever post."""
-    prompt = REVERSE_PROMPT.format(user_content=user_content[:8000])  # cap input
+def reverse_scout(user_content):
+    """Convert user-provided content (URL/text) to 4Ever post.
+    Uses multi-model fallback."""
+    prompt = REVERSE_PROMPT.format(user_content=user_content[:8000])
 
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"google_search": {}}],
-        "generationConfig": {
-            "temperature": 0.7,
-            "topP": 0.95,
-            "maxOutputTokens": 4096,
-            "thinkingConfig": {"thinkingBudget": 0},
-        }
-    }
+    try:
+        result = _call_gemini(prompt, body_overrides={
+            "generationConfig": {
+                "temperature": 0.7,
+                "topP": 0.95,
+                "maxOutputTokens": 4096,
+                "thinkingConfig": {"thinkingBudget": 0},
+            }
+        })
+    except Exception as e:
+        raise
 
-    url = f"{API_URL}?key={GEMINI_API_KEY}"
-
-    last_err = None
-    for attempt in range(max_retries):
-        try:
-            r = requests.post(url, json=body, timeout=90)
-            if r.status_code == 429:
-                last_err = RuntimeError(f"Gemini rate limited (attempt {attempt+1})")
-                wait = 20 * (attempt + 1)
-                log.info(f"⏳ 429, waiting {wait}s...")
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            data = r.json()
-            cand = data["candidates"][0]
-            parts = cand.get("content", {}).get("parts", [])
-            text = "".join(p.get("text", "") for p in parts)
-            if not text:
-                raise RuntimeError(f"No text (finish: {cand.get('finishReason')})")
-            result = extract_json(text)
-
-            for k in ["headline_line1", "headline_line2_ar", "source", "caption"]:
-                if k not in result:
-                    raise ValueError(f"Missing: {k}")
-
-            result["headline_line1"] = truncate_headline(result["headline_line1"], 50)
-            result["headline_line2_ar"] = truncate_headline(result["headline_line2_ar"], 30)
-
-            if not result.get("image_prompt"):
-                result["image_prompt"] = f"{result.get('source','')} {result.get('headline_line2_en','')} product, professional".strip()
-            if not result.get("image_query"):
-                result["image_query"] = result.get("headline_line2_en") or result.get("image_prompt", "")[:50]
-
-            return result
-        except Exception as e:
-            last_err = e
-            if attempt < max_retries - 1:
-                time.sleep(5)
-
-    raise (last_err or RuntimeError("Reverse scout failed"))
+    for k in ["headline_line1", "headline_line2_ar", "source", "caption"]:
+        if k not in result:
+            raise ValueError(f"Missing: {k}")
+    result["headline_line1"] = truncate_headline(result["headline_line1"], 50)
+    result["headline_line2_ar"] = truncate_headline(result["headline_line2_ar"], 30)
+    if not result.get("image_prompt"):
+        result["image_prompt"] = f"{result.get('source','')} {result.get('headline_line2_en','')} product, professional".strip()
+    if not result.get("image_query"):
+        result["image_query"] = result.get("headline_line2_en") or result.get("image_prompt", "")[:50]
+    return result
 
 
 def fetch_url_content(url):
-    """Fetch URL and return text content (article body, og:title, og:description)."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    """Fetch URL with multiple strategies (handles Facebook, X, regular sites)."""
+    log.info(f"📥 Fetching: {url[:80]}")
+
+    fetch_attempts = [
+        # Facebook external preview crawler
+        {"url": url, "headers": {
+            "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+            "Accept": "text/html,application/xhtml+xml",
+        }},
+        # Twitterbot
+        {"url": url, "headers": {
+            "User-Agent": "Twitterbot/1.0",
             "Accept": "text/html",
-        }
-        r = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
-        r.raise_for_status()
-        html = r.text
+        }},
+        # Googlebot
+        {"url": url, "headers": {
+            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "Accept": "text/html",
+        }},
+        # Regular browser
+        {"url": url, "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html",
+            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        }},
+    ]
 
-        # Extract title
-        title_m = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
-        og_title_m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        og_desc_m = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    html = ""
+    final_url = url
+    for i, attempt in enumerate(fetch_attempts):
+        try:
+            log.info(f"   Attempt {i+1}/{len(fetch_attempts)}")
+            r = requests.get(attempt["url"], headers=attempt["headers"], timeout=20, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > 500:
+                html = r.text
+                final_url = r.url
+                log.info(f"   ✅ Got {len(html)} chars")
+                break
+            else:
+                log.warning(f"   Status {r.status_code}, size {len(r.text)}")
+        except Exception as e:
+            log.warning(f"   Failed: {e}")
 
-        title = (og_title_m.group(1) if og_title_m else (title_m.group(1) if title_m else "")).strip()
-        desc = (og_desc_m.group(1) if og_desc_m else "").strip()
+    # Last resort: Jina AI reader (free LLM-friendly page reader)
+    if not html:
+        try:
+            log.info(f"   🔄 Trying Jina AI reader fallback...")
+            r = requests.get(f"https://r.jina.ai/{url}", timeout=30,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200 and len(r.text) > 200:
+                log.info(f"   ✅ Jina returned {len(r.text)} chars")
+                return {
+                    "title": "",
+                    "description": "",
+                    "body_text": r.text[:5000],
+                    "url": url,
+                }
+        except Exception as e:
+            log.warning(f"   Jina failed: {e}")
+        return {"title": "", "description": "", "body_text": "", "url": url,
+                "error": "All fetch attempts failed"}
 
-        # Strip scripts/styles and extract body text (first 4000 chars)
-        cleaned = re.sub(r'<script.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-        cleaned = re.sub(r'<style.*?</style>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
-        # Get text from main content areas
-        text_only = re.sub(r'<[^>]+>', ' ', cleaned)
-        text_only = re.sub(r'\s+', ' ', text_only).strip()
+    title_m = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+    og_title_m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    og_desc_m = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
 
-        return {
-            "title": title,
-            "description": desc,
-            "body_text": text_only[:4000],
-            "url": url,
-        }
-    except Exception as e:
-        log.warning(f"URL fetch failed: {e}")
-        return {"title": "", "description": "", "body_text": "", "url": url, "error": str(e)}
+    title = (og_title_m.group(1) if og_title_m else (title_m.group(1) if title_m else "")).strip()
+    desc = (og_desc_m.group(1) if og_desc_m else "").strip()
+
+    cleaned = re.sub(r'<script.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r'<style.*?</style>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+    text_only = re.sub(r'<[^>]+>', ' ', cleaned)
+    text_only = re.sub(r'\s+', ' ', text_only).strip()
+
+    log.info(f"   📰 Title: {title[:60]}")
+    log.info(f"   📝 Body length: {len(text_only)} chars")
+
+    return {
+        "title": title,
+        "description": desc,
+        "body_text": text_only[:5000],
+        "url": final_url,
+    }
