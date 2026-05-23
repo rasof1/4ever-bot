@@ -173,6 +173,35 @@ def try_download_image(url, save_path):
                     os.unlink(save_path)
                     log.warning(f"   🚫 Too square (logo likely): {w}x{h}, ratio={ratio:.2f}")
                     return False
+                # 🎯 Detect placeholder/blank images: too few bytes for the resolution
+                # Real photos: ~10-50 bytes per kilopixel
+                # Blank/placeholders: <5 bytes per kilopixel
+                kilopixels = (w * h) / 1000
+                bytes_per_kpx = total / kilopixels
+                if bytes_per_kpx < 8:
+                    os.unlink(save_path)
+                    log.warning(f"   🚫 Likely blank/placeholder: {total//1024}KB for {w}x{h} ({bytes_per_kpx:.1f} bytes/kpx)")
+                    return False
+                # 🎯 Detect mostly-white/blank by checking image stats
+                from PIL import ImageStat
+                try:
+                    with Image.open(save_path) as img2:
+                        rgb = img2.convert("RGB")
+                        stat = ImageStat.Stat(rgb)
+                        mean_r, mean_g, mean_b = stat.mean
+                        # If image is mostly white (all means > 230) it's likely blank/placeholder
+                        if mean_r > 230 and mean_g > 230 and mean_b > 230:
+                            os.unlink(save_path)
+                            log.warning(f"   🚫 Mostly white (placeholder): RGB means {mean_r:.0f},{mean_g:.0f},{mean_b:.0f}")
+                            return False
+                        # If image has very low variance (single color), reject
+                        stddev = sum(stat.stddev) / 3
+                        if stddev < 15:
+                            os.unlink(save_path)
+                            log.warning(f"   🚫 Low variance (single color): stddev={stddev:.1f}")
+                            return False
+                except Exception:
+                    pass
             log.info(f"   ✅ Got {total//1024}KB, {w}x{h}, ratio={ratio:.2f}")
             return True
         except Exception as ex:
@@ -434,3 +463,133 @@ def scout_multiple(count):
         except Exception as e:
             results.append({"error": str(e)})
     return results
+
+
+# ═══════════════════════════════════════════════════════════════
+# REVERSE MODE: Receive a URL/text/screenshot → generate a post
+# ═══════════════════════════════════════════════════════════════
+
+REVERSE_PROMPT = """أنت محرر تقني محترف لصفحة عربية "4Ever".
+
+استلمتُ المحتوى التالي من المستخدم وأريدك أن تحوّله إلى منشور 4Ever احترافي:
+
+═══ المحتوى ═══
+{user_content}
+═══════════════
+
+مهمتك:
+1. استخرج الفكرة الرئيسية للخبر
+2. تحقّق من صحة المعلومات (لو احتجت ابحث)
+3. أعد صياغته بأسلوب 4Ever الجذاب
+
+أنتج JSON فقط بنفس الشكل المعتاد:
+
+{{
+  "headline_line1": "عنوان عربي قصير - أقصى 35 حرف",
+  "headline_line2_ar": "السطر 2 - أقصى 18 حرف",
+  "headline_line2_en": "اسم منتج إنجليزي قصير أو فارغ",
+  "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai|samsung|sony|nintendo|xiaomi|amd|intel|playstation|xbox|qualcomm",
+  "category": "ai|phone|gaming|hardware|leak|emerging",
+  "product_badge": "تسمية إنجليزية كبيرة قصيرة",
+  "live_badge": "مواصفات إنجليزية قصيرة",
+  "caption": "كابشن عربي كامل بالقالب المعتاد - هوك، شرح، أهمية، سؤال تفاعلي، CTA للاشتراك، هاشتاقات",
+  "image_prompt": "وصف تفصيلي بصري بالإنجليزية للصورة المطلوبة",
+  "image_query": "استعلام بحث بسيط بالإنجليزية 4-6 كلمات",
+  "source_url": "الرابط الأصلي إذا كان موجوداً في المحتوى"
+}}
+"""
+
+
+def reverse_scout(user_content, max_retries=3):
+    """Convert user-provided content (URL, text, or scraped article) to 4Ever post."""
+    prompt = REVERSE_PROMPT.format(user_content=user_content[:8000])  # cap input
+
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {
+            "temperature": 0.7,
+            "topP": 0.95,
+            "maxOutputTokens": 4096,
+            "thinkingConfig": {"thinkingBudget": 0},
+        }
+    }
+
+    url = f"{API_URL}?key={GEMINI_API_KEY}"
+
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            r = requests.post(url, json=body, timeout=90)
+            if r.status_code == 429:
+                last_err = RuntimeError(f"Gemini rate limited (attempt {attempt+1})")
+                wait = 20 * (attempt + 1)
+                log.info(f"⏳ 429, waiting {wait}s...")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            cand = data["candidates"][0]
+            parts = cand.get("content", {}).get("parts", [])
+            text = "".join(p.get("text", "") for p in parts)
+            if not text:
+                raise RuntimeError(f"No text (finish: {cand.get('finishReason')})")
+            result = extract_json(text)
+
+            for k in ["headline_line1", "headline_line2_ar", "source", "caption"]:
+                if k not in result:
+                    raise ValueError(f"Missing: {k}")
+
+            result["headline_line1"] = truncate_headline(result["headline_line1"], 50)
+            result["headline_line2_ar"] = truncate_headline(result["headline_line2_ar"], 30)
+
+            if not result.get("image_prompt"):
+                result["image_prompt"] = f"{result.get('source','')} {result.get('headline_line2_en','')} product, professional".strip()
+            if not result.get("image_query"):
+                result["image_query"] = result.get("headline_line2_en") or result.get("image_prompt", "")[:50]
+
+            return result
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                time.sleep(5)
+
+    raise (last_err or RuntimeError("Reverse scout failed"))
+
+
+def fetch_url_content(url):
+    """Fetch URL and return text content (article body, og:title, og:description)."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html",
+        }
+        r = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+        r.raise_for_status()
+        html = r.text
+
+        # Extract title
+        title_m = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+        og_title_m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        og_desc_m = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+
+        title = (og_title_m.group(1) if og_title_m else (title_m.group(1) if title_m else "")).strip()
+        desc = (og_desc_m.group(1) if og_desc_m else "").strip()
+
+        # Strip scripts/styles and extract body text (first 4000 chars)
+        cleaned = re.sub(r'<script.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r'<style.*?</style>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        # Get text from main content areas
+        text_only = re.sub(r'<[^>]+>', ' ', cleaned)
+        text_only = re.sub(r'\s+', ' ', text_only).strip()
+
+        return {
+            "title": title,
+            "description": desc,
+            "body_text": text_only[:4000],
+            "url": url,
+        }
+    except Exception as e:
+        log.warning(f"URL fetch failed: {e}")
+        return {"title": "", "description": "", "body_text": "", "url": url, "error": str(e)}
