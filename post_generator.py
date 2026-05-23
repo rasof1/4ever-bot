@@ -188,6 +188,13 @@ SOURCE_LOGOS = {
     "amd": {"text": "AMD", "colors": [(237, 28, 36)] * 3},
     "intel": {"text": "Intel", "colors": [(0, 113, 197)] * 5},
     "qualcomm": {"text": "Qualcomm", "colors": [(225, 27, 34)] * 8},
+    # Government/MCIT
+    "mcit": {"text": "MCIT", "colors": [(0, 87, 184)] * 4},
+    "egypt": {"text": "Egypt Gov", "colors": [(206, 17, 38), (255, 255, 255), (0, 0, 0)] * 3},
+    # Other tech
+    "huawei": {"text": "HUAWEI", "colors": [(206, 6, 14)] * 6},
+    "tesla": {"text": "TESLA", "colors": [(204, 0, 0)] * 5},
+    "spacex": {"text": "SpaceX", "colors": [(255, 255, 255)] * 6},
 }
 
 
