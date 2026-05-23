@@ -15,6 +15,16 @@ import logging
 import requests
 from urllib.parse import urlparse, quote
 
+# Domains that serve mostly logos (avoid these)
+LOGO_DOMAINS = {
+    'freepnglogos.com', 'seeklogo.com', 'logos-world.net', 'logodix.com',
+    'logo.wine', 'logosvector.net', 'pngwing.com', 'pngegg.com',
+    'pngitem.com', 'pngmart.com', 'cleanpng.com', 'freelogovectors.net',
+    'brandfetch.com', 'brandslogos.com', '1000logos.net', 'logotyp.us',
+    'pngall.com', 'iconfinder.com', 'flaticon.com', 'icons8.com',
+    'shutterstock.com', 'istockphoto.com', 'gettyimages.com',  # watermarks
+}
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not set")
@@ -107,9 +117,26 @@ def extract_json(text):
 
 
 def try_download_image(url, save_path):
-    """Try downloading an image, return True on success."""
+    """Try downloading an image, return True on success.
+    Rejects logos, watermarks, and square images (likely logos)."""
     if not url:
         return False
+
+    # Reject known logo/watermark domains
+    try:
+        host = urlparse(url).hostname or ""
+        host = host.replace("www.", "").lower()
+        if host in LOGO_DOMAINS:
+            log.warning(f"   🚫 Logo domain rejected: {host}")
+            return False
+        # Also reject if URL path contains 'logo' or 'icon'
+        path_lower = url.lower()
+        if any(x in path_lower for x in ['/logo', 'logo.', '-logo-', '_logo_', '/icon', 'icon.', '-icon-']):
+            log.warning(f"   🚫 Logo URL rejected: {url[:80]}")
+            return False
+    except Exception:
+        pass
+
     try:
         headers = WIKIPEDIA_HEADERS if ("wikipedia.org" in url or "wikimedia.org" in url) else DEFAULT_HEADERS
         r = requests.get(url, headers=headers, timeout=25, stream=True, allow_redirects=True)
@@ -138,12 +165,20 @@ def try_download_image(url, save_path):
                 w, h = img.size
                 if w < 400 or h < 200:
                     os.unlink(save_path)
+                    log.warning(f"   🚫 Too small: {w}x{h}")
                     return False
-            log.info(f"   ✅ Got {total//1024}KB, {w}x{h}")
+                # 🎯 Reject square-ish images (logos are usually 1:1, photos are 16:9 or 4:3)
+                ratio = max(w, h) / min(w, h)
+                if ratio < 1.25:
+                    os.unlink(save_path)
+                    log.warning(f"   🚫 Too square (logo likely): {w}x{h}, ratio={ratio:.2f}")
+                    return False
+            log.info(f"   ✅ Got {total//1024}KB, {w}x{h}, ratio={ratio:.2f}")
             return True
-        except Exception:
+        except Exception as ex:
             if os.path.exists(save_path):
                 os.unlink(save_path)
+            log.warning(f"   Invalid: {ex}")
             return False
     except Exception as e:
         log.warning(f"   Exception: {e}")
