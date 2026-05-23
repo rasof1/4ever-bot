@@ -17,7 +17,7 @@ from telegram.ext import (
 from post_generator import generate_post
 from news_scout import (
     scout_news, download_image, reverse_scout, fetch_url_content,
-    acquire_validated_image,
+    acquire_validated_image, LANG_INSTRUCTIONS,
 )
 
 logging.basicConfig(
@@ -63,6 +63,8 @@ def base_config(main_image_path, news):
             "line2_english": news.get("headline_line2_en", ""),
             "font_size": 42,
             "highlight_color": "#00d4ff",
+            "is_rtl": LANG_INSTRUCTIONS.get(news.get("_lang", "ar"), LANG_INSTRUCTIONS["ar"])["is_rtl"],
+            "font_name": "Orbitron.ttf" if news.get("_lang") in ("en", "fr") else "Cairo.ttf",
         },
         "source_logo": {"type": news.get("source", "google")},
         "trend_indicator": {"show": True, "color": "#10b981"},
@@ -234,18 +236,174 @@ async def generate_and_send_one(update, idx, total):
 async def cmd_post(update, ctx):
     text = update.message.text or ""
     count = parse_count(text)
-    await update.message.reply_text(
-        f"🚀 بدء التوليد\nعدد المنشورات: {count}\n⏱ المتوقّع: ~{count * 30} ثانية"
-    )
-    for i in range(1, count + 1):
-        await generate_and_send_one(update, i, count)
-    if count > 1:
-        await update.message.reply_text(f"✅ تم توليد {count} منشورات!")
+    await ask_about_language(update.message, ctx, "auto", {"count": count})
 
 
 # ─── Reverse Mode ────────────────────────────────────────────
 
 URL_PATTERN = re.compile(r'https?://[^\s]+')
+
+
+async def ask_about_language(message, ctx, callback_kind, payload):
+    """Ask user which language for the upcoming post.
+    callback_kind: 'auto' | 'url' | 'text' | 'photo'
+    payload: dict with data needed to continue (e.g. {'url': '...'} or {'text': '...'})
+    """
+    user_id = message.from_user.id
+
+    # Store pending payload
+    PENDING_NEWS[user_id] = {
+        "kind": "lang_choice",
+        "callback_kind": callback_kind,
+        "payload": payload,
+        "chat_id": message.chat_id,
+    }
+
+    keyboard = [[
+        InlineKeyboardButton("🇸🇦 العربية", callback_data=f"lang_ar_{user_id}"),
+        InlineKeyboardButton("🇬🇧 English", callback_data=f"lang_en_{user_id}"),
+        InlineKeyboardButton("🇫🇷 Français", callback_data=f"lang_fr_{user_id}"),
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    msg = (
+        "🌐 *اختر لغة المنشور:*\n\n"
+        "🇸🇦 العربية - منشور باللغة العربية\n"
+        "🇬🇧 English - English post\n"
+        "🇫🇷 Français - Publication en français"
+    )
+    return await message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+
+
+async def handle_language_choice(update, ctx):
+    """Callback when user selects a language."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    if len(parts) < 3:
+        return
+    lang = parts[1]  # ar, en, fr
+    try:
+        user_id = int(parts[2])
+    except ValueError:
+        return
+
+    if query.from_user.id != user_id:
+        await query.answer("⚠️ هذا الزر لمستخدم آخر", show_alert=True)
+        return
+
+    pending = PENDING_NEWS.get(user_id)
+    if not pending or pending.get("kind") != "lang_choice":
+        await query.edit_message_text("⚠️ انتهت المهلة. حاول مرة أخرى.")
+        return
+
+    callback_kind = pending["callback_kind"]
+    payload = pending["payload"]
+    PENDING_NEWS.pop(user_id, None)
+
+    lang_label = {"ar": "🇸🇦 العربية", "en": "🇬🇧 English", "fr": "🇫🇷 Français"}[lang]
+    progress = query.message
+    await progress.edit_text(f"✅ {lang_label}\n\n🔄 جاري التنفيذ...")
+
+    # Dispatch to appropriate handler based on what user originally sent
+    try:
+        if callback_kind == "auto":
+            count = payload.get("count", 1)
+            for i in range(1, count + 1):
+                await generate_and_send_one_with_lang(progress, i, count, lang)
+            if count > 1:
+                await progress.reply_text(f"✅ تم توليد {count} منشورات!")
+        elif callback_kind == "url":
+            await execute_reverse_url(progress, payload["url"], payload["full_text"], lang)
+        elif callback_kind == "text":
+            await execute_reverse_text(progress, payload["text"], lang)
+        elif callback_kind == "photo_caption":
+            await execute_reverse_photo_caption(progress, payload["caption"], lang)
+    except Exception as e:
+        logger.error(f"Lang dispatch failed: {e}\n{traceback.format_exc()}")
+        await progress.reply_text(f"❌ فشل: {str(e)[:200]}")
+
+
+async def generate_and_send_one_with_lang(message, idx, total, lang):
+    """Auto-mode generator with language."""
+    progress = await message.reply_text(
+        f"🔄 *جاري التوليد ({idx}/{total})...*\n🔍 البحث عن آخر ترند تقني...",
+        parse_mode="Markdown"
+    )
+    try:
+        loop = asyncio.get_event_loop()
+        news = await loop.run_in_executor(None, scout_news, "", lang)
+        await render_and_send_post(message, news, idx, total, progress)
+    except Exception as e:
+        logger.error(f"Error: {e}\n{traceback.format_exc()}")
+        await progress.edit_text(
+            f"❌ فشل توليد المنشور {idx}/{total}\n\nالسبب: {str(e)[:200]}"
+        )
+
+
+async def execute_reverse_url(message, url, full_text, lang):
+    """Execute reverse URL with a chosen language."""
+    progress = await message.reply_text(
+        "📥 جاري قراءة الرابط...",
+        parse_mode="Markdown"
+    )
+    try:
+        loop = asyncio.get_event_loop()
+        content_data = await loop.run_in_executor(None, fetch_url_content, url)
+        if content_data.get("error"):
+            await progress.edit_text(f"❌ فشلت قراءة الرابط: {content_data['error']}")
+            return
+
+        user_extras = full_text.replace(url, "").strip()
+        combined_parts = [f"URL: {url}"]
+        if content_data.get("title"): combined_parts.append(f"Title: {content_data['title']}")
+        if content_data.get("description"): combined_parts.append(f"Description: {content_data['description']}")
+        if content_data.get("body_text"): combined_parts.append(f"Article body: {content_data['body_text']}")
+        if user_extras: combined_parts.append(f"User context: {user_extras}")
+        combined = "\n".join(combined_parts)
+
+        await progress.edit_text(
+            f"✅ قرأت المقال: {content_data.get('title','بدون عنوان')[:50]}\n"
+            f"🤖 جاري إعادة الصياغة..."
+        )
+
+        news = await loop.run_in_executor(None, reverse_scout, combined, lang)
+        news["source_url"] = url
+        await ask_about_image(message, ctx_dummy_for_message(message), news, progress)
+    except Exception as e:
+        logger.error(f"Reverse URL failed: {e}\n{traceback.format_exc()}")
+        await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
+
+
+async def execute_reverse_text(message, text, lang):
+    """Execute reverse text with a chosen language."""
+    progress = await message.reply_text("🤖 جاري تحويل النص لمنشور...")
+    try:
+        loop = asyncio.get_event_loop()
+        news = await loop.run_in_executor(None, reverse_scout, text, lang)
+        await ask_about_image(message, ctx_dummy_for_message(message), news, progress)
+    except Exception as e:
+        logger.error(f"Reverse text failed: {e}\n{traceback.format_exc()}")
+        await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
+
+
+async def execute_reverse_photo_caption(message, caption, lang):
+    """Execute reverse with photo+caption."""
+    progress = await message.reply_text("🤖 جاري تحويل المحتوى لمنشور...")
+    try:
+        loop = asyncio.get_event_loop()
+        prompt_text = f"Screenshot caption from user: {caption}\n\nGenerate a 4Ever post."
+        news = await loop.run_in_executor(None, reverse_scout, prompt_text, lang)
+        await ask_about_image(message, ctx_dummy_for_message(message), news, progress)
+    except Exception as e:
+        logger.error(f"Photo+caption failed: {e}\n{traceback.format_exc()}")
+        await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
+
+
+def ctx_dummy_for_message(message):
+    """Helper - we don't need ctx in newer functions."""
+    return None
 
 
 async def ask_about_image(message, ctx, news, progress):
@@ -268,8 +426,8 @@ async def ask_about_image(message, ctx, news, progress):
         f"✅ *جاهز للتصميم!*\n\n"
         f"📰 العنوان: {news.get('headline_line1','')[:60]}\n"
         f"🏢 المصدر: {news.get('source','')}\n\n"
-        f"🖼️ *هل عندك صورة مناسبة تريد استخدامها؟*\n\n"
-        f"• نعم → ارفع صورتك\n"
+        f"🖼️ *هل عندك صورة أو فيديو مناسب تريد استخدامه؟*\n\n"
+        f"• نعم → ارفع صورة أو فيديو (سأستخرج إطار منه)\n"
         f"• لا → سأبحث/أولّد صورة مناسبة"
     )
     await progress.edit_text(preview, parse_mode="Markdown", reply_markup=reply_markup)
@@ -306,9 +464,11 @@ async def handle_image_choice(update, ctx):
     if choice == "yes":
         PENDING_NEWS[user_id]["awaiting_image"] = True
         await query.edit_message_text(
-            f"📸 *تمام، ارفع الصورة الآن*\n\n"
+            f"📸 *تمام، ارفع الآن:*\n\n"
+            f"• صورة (PNG/JPG) — تُستخدم مباشرة\n"
+            f"• فيديو (MP4/MOV) — سأستخرج إطار جذاب منه\n\n"
             f"العنوان: {news.get('headline_line1','')[:60]}\n\n"
-            f"⏳ بانتظار صورتك...\n"
+            f"⏳ بانتظار محتواك...\n"
             f"لإلغاء: /cancel",
             parse_mode="Markdown"
         )
@@ -402,7 +562,7 @@ async def handle_photo(update, ctx):
             PENDING_NEWS.pop(user_id, None)
         return
 
-    # Case 2: Screenshot with caption
+    # Case 2: Screenshot with caption → ask language first
     caption = (update.message.caption or "").strip()
     if not caption or len(caption) < 10:
         await update.message.reply_text(
@@ -411,18 +571,138 @@ async def handle_photo(update, ctx):
         )
         return
 
-    progress = await update.message.reply_text(
-        "🔄 *الوضع العكسي - صورة*\n🤖 جاري تحويل المحتوى لمنشور...",
-        parse_mode="Markdown"
-    )
+    await ask_about_language(update.message, ctx, "photo_caption", {"caption": caption})
+
+
+async def handle_video(update, ctx):
+    """User uploaded a video. Two cases:
+    1. They're providing custom video for pending news (extract frame)
+    2. They're sending a video with caption to convert to post
+    """
+    user_id = update.effective_user.id
+    pending = PENDING_NEWS.get(user_id)
+
+    # Get the video object (could be video, animation, video_note, or document with video MIME)
+    video = update.message.video or update.message.animation or update.message.video_note
+    document = update.message.document
+
+    # If it's a document, check if it's actually a video
+    is_video_doc = document and document.mime_type and document.mime_type.startswith("video/")
+
+    if not video and not is_video_doc:
+        return  # not actually a video
+
+    # Case 1: User uploading custom video for pending news
+    if pending and pending.get("awaiting_image"):
+        news = pending["news"]
+        progress = await update.message.reply_text(
+            "🎬 *تم استلام الفيديو! جاري استخراج أفضل إطار...*",
+            parse_mode="Markdown"
+        )
+        try:
+            # Download video
+            file_obj = video or document
+            tg_file = await ctx.bot.get_file(file_obj.file_id)
+
+            video_path = str(OUTPUT_DIR / f"vid_{user_id}_{os.getpid()}.mp4")
+            await tg_file.download_to_drive(video_path)
+            logger.info(f"📥 Downloaded user video: {video_path} ({os.path.getsize(video_path)//1024}KB)")
+
+            # Extract a frame using ffmpeg or PIL fallback
+            frame_path = str(OUTPUT_DIR / f"frame_{user_id}_{os.getpid()}.jpg")
+            extract_success = await extract_video_frame(video_path, frame_path)
+
+            if not extract_success:
+                await progress.edit_text("❌ فشل استخراج إطار من الفيديو. جرّب صورة بدلاً منه.")
+                PENDING_NEWS.pop(user_id, None)
+                try: os.unlink(video_path)
+                except: pass
+                return
+
+            PENDING_NEWS.pop(user_id, None)
+            await render_with_image(update.message, news, frame_path, progress)
+
+            # Cleanup
+            try: os.unlink(video_path)
+            except: pass
+
+        except Exception as e:
+            logger.error(f"Custom video failed: {e}\n{traceback.format_exc()}")
+            await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
+            PENDING_NEWS.pop(user_id, None)
+        return
+
+    # Case 2: Video with caption as news source
+    caption = (update.message.caption or "").strip()
+    if not caption or len(caption) < 10:
+        await update.message.reply_text(
+            "🎬 وصلني الفيديو. لكن أحتاج وصف الخبر في الكابشن. "
+            "أعد الإرسال مع كابشن يصف الخبر."
+        )
+        return
+
+    await ask_about_language(update.message, ctx, "photo_caption", {"caption": caption})
+
+
+async def extract_video_frame(video_path, frame_path):
+    """Extract a frame from a video file. Uses ffmpeg if available, else PIL."""
+    import subprocess
+    import shutil
+
+    # Try ffmpeg (best quality + speed)
+    if shutil.which("ffmpeg"):
+        try:
+            # Get duration to pick a frame around 25% of the way through
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+                capture_output=True, text=True, timeout=10
+            )
+            duration = 0.0
+            if result.returncode == 0 and result.stdout.strip():
+                try:
+                    duration = float(result.stdout.strip())
+                except ValueError:
+                    pass
+
+            seek_time = max(0.5, duration * 0.25) if duration > 0 else 1.0
+
+            # Extract frame at seek_time, scaled, high quality
+            subprocess.run(
+                ["ffmpeg", "-y", "-ss", str(seek_time), "-i", video_path,
+                 "-vframes", "1", "-q:v", "2",
+                 "-vf", "scale=1280:-1",
+                 frame_path],
+                capture_output=True, timeout=30
+            )
+
+            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 5000:
+                logger.info(f"   ✅ ffmpeg extracted frame at t={seek_time:.1f}s")
+                return True
+        except Exception as e:
+            logger.warning(f"   ffmpeg failed: {e}")
+
+    # Fallback: try opencv if available
     try:
-        loop = asyncio.get_event_loop()
-        prompt_text = f"Screenshot caption from user: {caption}\n\nGenerate a 4Ever post based on this news."
-        news = await loop.run_in_executor(None, reverse_scout, prompt_text)
-        await ask_about_image(update.message, ctx, news, progress)
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, total // 4)
+        ret, frame = cap.read()
+        cap.release()
+        if ret:
+            cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 5000:
+                logger.info(f"   ✅ opencv extracted frame")
+                return True
+    except ImportError:
+        pass
     except Exception as e:
-        logger.error(f"Photo handler failed: {e}\n{traceback.format_exc()}")
-        await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
+        logger.warning(f"   opencv failed: {e}")
+
+    logger.error("   ❌ Could not extract frame - neither ffmpeg nor opencv available")
+    return False
 
 
 async def handle_text_router(update, ctx):
@@ -430,17 +710,23 @@ async def handle_text_router(update, ctx):
     if not text:
         return
 
+    # Explicit auto-post command
     if text.startswith("منشور") or text.lower().startswith("/post") or text.lower() == "post":
-        await cmd_post(update, ctx)
+        count = parse_count(text)
+        # Ask for language before generating
+        await ask_about_language(update.message, ctx, "auto", {"count": count})
         return
 
+    # URL → ask language → reverse mode
     urls = URL_PATTERN.findall(text)
     if urls:
-        await handle_reverse_url(update, ctx, urls[0], text)
+        await ask_about_language(update.message, ctx, "url",
+                                 {"url": urls[0], "full_text": text})
         return
 
+    # Long descriptive text → ask language → reverse mode
     if len(text) > 20:
-        await handle_reverse_text(update, ctx, text)
+        await ask_about_language(update.message, ctx, "text", {"text": text})
         return
 
     await update.message.reply_text(
@@ -465,10 +751,16 @@ def main():
     app.add_handler(CommandHandler("post", cmd_post))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
 
-    # 🆕 Callback query handler for inline buttons
+    # Callback query handlers for inline buttons
     app.add_handler(CallbackQueryHandler(handle_image_choice, pattern=r"^img_(yes|no)_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_language_choice, pattern=r"^lang_(ar|en|fr)_\d+$"))
 
-    # Photos → handle_photo (which checks for pending state)
+    # 🆕 Videos & animations (GIF) → handle_video
+    app.add_handler(MessageHandler(
+        filters.VIDEO | filters.ANIMATION | filters.VIDEO_NOTE | filters.Document.VIDEO,
+        handle_video
+    ))
+    # Photos → handle_photo
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     # Text → router
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_router))

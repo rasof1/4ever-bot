@@ -362,30 +362,37 @@ def fit_text_to_width(draw, text, max_width, max_font_size, min_font_size=24, fo
 def draw_headline(canvas, gy, th, headline):
     draw = ImageDraw.Draw(canvas, "RGBA")
     W = canvas.size[0]
-    # Match frame width (main asset region), not full canvas - text must fit visually under image
-    # Main asset width is typically 880-920px, so headline must fit there
-    max_text_width = int(W * 0.78)  # ~840px on 1080 canvas - matches frame
+    max_text_width = int(W * 0.78)
     accent = headline.get("highlight_color", "#00d4ff")
     line1 = headline["line1"]
     line2_ar = headline.get("line2_arabic", "")
     line2_en = headline.get("line2_english", "").strip()
 
+    # 🌐 Language support: determines RTL vs LTR rendering
+    is_rtl = headline.get("is_rtl", True)  # Default Arabic
+    font_name = headline.get("font_name", "Cairo.ttf")
+
     base_size = headline.get("font_size", 44)
 
-    # 🎯 Auto-fit line 1
-    font1, size1 = fit_text_to_width(draw, line1, max_text_width, base_size, min_font_size=20)
-    bb1 = measure_ar(draw, line1, font1)
+    # Auto-fit line 1
+    font1, size1 = fit_text_to_width(draw, line1, max_text_width, base_size,
+                                      min_font_size=20, font_name=font_name, is_ar=is_rtl)
+    if is_rtl:
+        bb1 = measure_ar(draw, line1, font1)
+    else:
+        bb1 = draw.textbbox((0, 0), line1, font=font1)
     w1, h1 = bb1[2] - bb1[0], bb1[3] - bb1[1]
     fy = gy + th + 50
     x1 = (W - w1) // 2
-    draw_text_shadow(draw, (x1, fy), line1, font1, (255, 255, 255, 255), is_ar=True)
+    draw_text_shadow(draw, (x1, fy), line1, font1, (255, 255, 255, 255), is_ar=is_rtl)
 
     line2_y = fy + h1 + 32
     if line2_ar:
-        if line2_en:
-            # Auto-fit BOTH parts together
-            combined_text = f"{line2_en}  {line2_ar}"  # rough measure
-            font2, size2 = fit_text_to_width(draw, combined_text, max_text_width, base_size - 4, min_font_size=18)
+        if line2_en and is_rtl:
+            # Arabic + English split layout (only for RTL mode)
+            combined_text = f"{line2_en}  {line2_ar}"
+            font2, size2 = fit_text_to_width(draw, combined_text, max_text_width, base_size - 4,
+                                              min_font_size=18, font_name=font_name, is_ar=True)
             bb2 = measure_ar(draw, line2_ar, font2)
             bb_en = draw.textbbox((0, 0), line2_en, font=font2)
             w2, en_w = bb2[2] - bb2[0], bb_en[2] - bb_en[0]
@@ -396,11 +403,16 @@ def draw_headline(canvas, gy, th, headline):
                              line2_ar, font2, (255, 255, 255, 255), is_ar=True)
             line_height = bb2[3] - bb2[1]
         else:
-            font2, _ = fit_text_to_width(draw, line2_ar, max_text_width, base_size - 4, min_font_size=18)
-            bb2 = measure_ar(draw, line2_ar, font2)
+            # Single-line rendering (works for AR, EN, FR)
+            font2, _ = fit_text_to_width(draw, line2_ar, max_text_width, base_size - 4,
+                                          min_font_size=18, font_name=font_name, is_ar=is_rtl)
+            if is_rtl:
+                bb2 = measure_ar(draw, line2_ar, font2)
+            else:
+                bb2 = draw.textbbox((0, 0), line2_ar, font=font2)
             x2 = (W - (bb2[2] - bb2[0])) // 2
             draw_text_shadow(draw, (x2, line2_y), line2_ar, font2,
-                             (255, 255, 255, 255), is_ar=True)
+                             (255, 255, 255, 255), is_ar=is_rtl)
             line_height = bb2[3] - bb2[1]
         return line2_y + line_height + 36
     return fy + h1 + 36

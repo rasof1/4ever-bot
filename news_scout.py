@@ -26,6 +26,35 @@ _env_model = os.getenv("GEMINI_MODEL")
 if _env_model:
     FALLBACK_MODELS = [_env_model] + [m for m in FALLBACK_MODELS if m != _env_model]
 
+# Language config
+LANG_INSTRUCTIONS = {
+    "ar": {
+        "name_ar": "العربية",
+        "instruction": "اكتب جميع النصوص باللغة العربية الفصحى المعاصرة. استخدم لهجة احترافية وودودة.",
+        "headline_lang": "Arabic (Modern Standard Arabic)",
+        "caption_lang": "Arabic",
+        "hashtag_examples": "#تقنية #ذكاء_اصطناعي #4Ever",
+        "is_rtl": True,
+    },
+    "en": {
+        "name_ar": "الإنجليزية",
+        "instruction": "Write ALL text fields in English. Use professional, engaging, viral-tech-blog style. The headline_line1 should be a catchy English headline, headline_line2_ar should be the English subtitle (use headline_line2_ar field anyway for compatibility).",
+        "headline_lang": "English",
+        "caption_lang": "English",
+        "hashtag_examples": "#Tech #AI #4Ever #Innovation",
+        "is_rtl": False,
+    },
+    "fr": {
+        "name_ar": "الفرنسية",
+        "instruction": "Écris TOUS les textes en français. Utilise un style professionnel, engageant, type blog tech viral. Le headline_line1 doit être un titre accrocheur en français, headline_line2_ar doit être le sous-titre en français (utilise quand même le champ headline_line2_ar pour compatibilité).",
+        "headline_lang": "French",
+        "caption_lang": "French",
+        "hashtag_examples": "#Tech #IA #4Ever #Innovation",
+        "is_rtl": False,
+    },
+}
+
+
 log = logging.getLogger("news_scout")
 log.setLevel(logging.INFO)
 if not log.handlers:
@@ -396,9 +425,14 @@ def _finalize_result(result):
     return result
 
 
-def scout_news(extra_instructions=""):
-    prompt = PROMPT_TEMPLATE.format(extra_instructions=extra_instructions or "")
+def scout_news(extra_instructions="", lang="ar"):
+    """Scout latest tech news. lang: 'ar' (Arabic), 'en' (English), 'fr' (French)."""
+    lang_cfg = LANG_INSTRUCTIONS.get(lang, LANG_INSTRUCTIONS["ar"])
+    lang_block = f"\n\n🌐 لغة المنشور: {lang_cfg['caption_lang']}\n{lang_cfg['instruction']}\nأمثلة هاشتاقات بهذه اللغة: {lang_cfg['hashtag_examples']}\n"
+    full_extras = lang_block + (extra_instructions or "")
+    prompt = PROMPT_TEMPLATE.format(extra_instructions=full_extras)
     result = _call_gemini(prompt)
+    result["_lang"] = lang  # Store for downstream use
     return _finalize_result(result)
 
 
@@ -408,7 +442,7 @@ def download_image(news_data, save_path):
     raise ValueError("All image strategies failed")
 
 
-def scout_multiple(count):
+def scout_multiple(count, lang="ar"):
     results = []
     avoid = []
     for i in range(count):
@@ -418,7 +452,7 @@ def scout_multiple(count):
         if avoid:
             extra = f"تجنّب: {', '.join(avoid)}. خبر مختلف ومن مجال آخر."
         try:
-            data = scout_news(extra_instructions=extra)
+            data = scout_news(extra_instructions=extra, lang=lang)
             results.append(data)
             topic = data.get("headline_line2_en") or data["headline_line1"][:30]
             avoid.append(topic)
@@ -465,11 +499,16 @@ REVERSE_PROMPT = r"""أنت محرر تقني محترف لصفحة عربية "
 """
 
 
-def reverse_scout(user_content):
-    prompt = REVERSE_PROMPT.format(user_content=user_content[:8000])
+def reverse_scout(user_content, lang="ar"):
+    """Convert user-provided content to 4Ever post in specified language."""
+    lang_cfg = LANG_INSTRUCTIONS.get(lang, LANG_INSTRUCTIONS["ar"])
+    lang_block = f"\n\n🌐 اللغة المطلوبة للمنشور: {lang_cfg['caption_lang']}\n{lang_cfg['instruction']}\nأمثلة وسوم بهذه اللغة: {lang_cfg['hashtag_examples']}\n"
+    full_content = user_content[:8000] + lang_block
+    prompt = REVERSE_PROMPT.format(user_content=full_content)
     result = _call_gemini(prompt, body_overrides={
         "generationConfig": {"temperature": 0.7}
     })
+    result["_lang"] = lang
     return _finalize_result(result)
 
 

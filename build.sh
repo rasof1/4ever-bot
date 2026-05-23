@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Render.com build script
 set -e
 
 echo "📦 Installing system dependencies..."
-apt-get update && apt-get install -y libraqm0 libfribidi0 libharfbuzz0b || true
+# Render runs as root in build phase - apt-get works directly
+apt-get update -y && apt-get install -y libraqm0 libfribidi0 libharfbuzz0b ffmpeg || \
+    (echo "⚠️ apt failed, trying alternative..." && \
+     apt-get install -y libraqm0 libfribidi0 libharfbuzz0b ffmpeg)
+
+echo "🔍 Checking ffmpeg..."
+ffmpeg -version | head -1 || echo "⚠️ ffmpeg not available (video extraction will be unavailable)"
 
 echo "🐍 Installing Python packages..."
 pip install --upgrade pip
 pip install -r requirements.txt
 
-echo "🔍 Verifying Raqm (Arabic shaping) support..."
-python -c "from PIL import features; assert features.check('raqm'), 'Raqm NOT available - Arabic text will break'; print('✅ Raqm OK')"
+echo "🔍 Verifying Raqm (Arabic shaping)..."
+python -c "from PIL import features; assert features.check('raqm'), 'Raqm NOT available'; print('✅ Raqm OK')"
 
 echo "✅ Build complete"
