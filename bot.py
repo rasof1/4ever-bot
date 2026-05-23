@@ -154,50 +154,187 @@ def parse_count(text):
     return 1
 
 
+async def composite_video_into_design(design_png, design_box, video_path, output_mp4):
+    """
+    Composite a video INTO the 4Ever design as the central video element.
+    
+    Args:
+        design_png: Path to the 1080x1080 post image (with frame from video's first frame).
+        design_box: (gx, gy, w, h) tuple - where the image is in the design.
+        video_path: Original user video.
+        output_mp4: Output MP4 path.
+    
+    The technique:
+    1. Use design_png as a background image
+    2. Crop+scale video to fit the design_box
+    3. Overlay video on top of design_png at (gx, gy)
+    4. Output 1080x1080 MP4 (Instagram/Facebook reels-ready)
+    """
+    import subprocess
+    import imageio_ffmpeg
+
+    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    gx, gy, w, h = design_box
+    logger.info(f"🎬 Compositing video into design at ({gx},{gy}) size {w}x{h}")
+
+    # ffmpeg approach:
+    #   - input 1: design.png (loop as video)
+    #   - input 2: original video (scale to fit box, with audio)
+    #   - overlay video onto design at (gx, gy)
+    #   - output as MP4 1080x1080, max 60s, with audio from source
+    
+    # Build filter:
+    #   - Scale video to fit inside box, preserving aspect ratio (cover entire box)
+    #   - "scale=W:H:force_original_aspect_ratio=increase,crop=W:H" = fill box, crop excess
+    
+    filter_complex = (
+        f"[0:v]format=rgba[bg];"
+        f"[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h}[vid];"
+        f"[bg][vid]overlay={gx}:{gy}:shortest=1[out]"
+    )
+
+    try:
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-loop", "1", "-i", design_png,          # input 0: design as static
+            "-i", video_path,                         # input 1: source video
+            "-filter_complex", filter_complex,
+            "-map", "[out]",                         # video from filter
+            "-map", "1:a?",                          # audio from source (optional)
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-shortest",
+            "-movflags", "+faststart",
+            "-t", "60",                              # Cap at 60 seconds
+            output_mp4
+        ]
+        logger.info(f"   Running ffmpeg composite...")
+        result = subprocess.run(cmd, capture_output=True, timeout=180)
+
+        if result.returncode != 0:
+            stderr = result.stderr.decode('utf-8', errors='ignore')[-800:]
+            logger.error(f"   ffmpeg failed:\n{stderr}")
+            return False
+
+        if not os.path.exists(output_mp4) or os.path.getsize(output_mp4) < 10000:
+            logger.error("   Output file missing or too small")
+            return False
+
+        size_mb = os.path.getsize(output_mp4) / 1024 / 1024
+        logger.info(f"   ✅ Composite video: {size_mb:.1f} MB")
+        return True
+    except subprocess.TimeoutExpired:
+        logger.error("   ffmpeg composite timeout (>3 min)")
+        return False
+    except Exception as e:
+        logger.error(f"   Composite error: {e}")
+        return False
+
+
 async def render_with_image(message, news, img_path, progress, video_path=None):
-    """Render post using a specific image path.
-    If video_path provided, also send the original video AFTER the post.
+    """Render the 4Ever post.
+    - If video_path provided: composite video INTO the design → output MP4 reels
+    - Otherwise: standard image post
     """
     loop = asyncio.get_event_loop()
-    await progress.edit_text("🎨 جاري تصميم المنشور...")
-
+    caption = news.get("caption", "")
     out_path = str(OUTPUT_DIR / f"post_{os.getpid()}_{id(news)}.png")
     cfg = base_config(img_path, news)
-    await loop.run_in_executor(None, generate_post, cfg, out_path)
 
-    caption = news.get("caption", "")
-
-    # 📸 Send the designed post image first
-    if len(caption) <= 1024:
-        with open(out_path, "rb") as f:
-            await message.reply_photo(photo=f, caption=caption)
-    else:
-        with open(out_path, "rb") as f:
-            await message.reply_photo(photo=f)
-        for chunk_start in range(0, len(caption), 4000):
-            await message.reply_text(caption[chunk_start:chunk_start + 4000])
-
-    # 🎬 If user provided a video, send it AFTER the post (so they have both)
+    # 🎬 VIDEO MODE: build a video reel with 4Ever frame
     if video_path and os.path.exists(video_path):
-        try:
-            await message.reply_text("🎬 الفيديو الأصلي:")
-            with open(video_path, "rb") as f:
-                await message.reply_video(
-                    video=f,
-                    supports_streaming=True,
-                    width=1280,
-                    height=720,
-                )
-            logger.info(f"   ✅ Original video sent ({os.path.getsize(video_path)//1024}KB)")
-        except Exception as e:
-            logger.warning(f"   Failed to send original video: {e}")
-            # Try as document if reply_video fails (e.g. format issue)
+        await progress.edit_text("🎨 جاري تصميم إطار المنشور...")
+
+        # Generate the design and get the box coords of the image area
+        # We use return_box=True to know exactly where to overlay the video
+        def _gen():
+            return generate_post(cfg, out_path, return_box=True)
+        result = await loop.run_in_executor(None, _gen)
+        design_path, box_coords = result
+
+        await progress.edit_text(
+            "🎬 جاري دمج الفيديو في تصميم 4Ever...\n"
+            "⏳ هذا قد يستغرق دقيقة..."
+        )
+
+        # Composite video into the design's image area
+        video_out = str(OUTPUT_DIR / f"reel_{os.getpid()}_{id(news)}.mp4")
+        success = await composite_video_into_design(
+            design_path, box_coords, video_path, video_out
+        )
+
+        if success and os.path.exists(video_out):
+            # Send as VIDEO reel
+            try:
+                await progress.edit_text("📤 جاري الإرسال...")
+                with open(video_out, "rb") as f:
+                    if len(caption) <= 1024:
+                        await message.reply_video(
+                            video=f,
+                            caption=caption,
+                            supports_streaming=True,
+                            width=1080, height=1080,
+                        )
+                    else:
+                        await message.reply_video(
+                            video=f,
+                            supports_streaming=True,
+                            width=1080, height=1080,
+                        )
+                        for chunk_start in range(0, len(caption), 4000):
+                            await message.reply_text(caption[chunk_start:chunk_start + 4000])
+                logger.info(f"   ✅ Reel sent: {os.path.getsize(video_out)//1024} KB")
+            except Exception as e:
+                logger.error(f"   Failed to send reel: {e}")
+                # Fallback: send as document
+                try:
+                    with open(video_out, "rb") as f:
+                        await message.reply_document(document=f, caption=caption[:1024])
+                except Exception as e2:
+                    logger.error(f"   Also failed as document: {e2}")
+                    # Final fallback: send static design image
+                    with open(out_path, "rb") as f:
+                        await message.reply_photo(photo=f, caption=caption[:1024])
+            # Cleanup video output
+            try: os.unlink(video_out)
+            except: pass
+        else:
+            # Compositing failed - fall back to image post + send original video after
+            await progress.edit_text("⚠️ تعذر دمج الفيديو، أرسل تصميم بصورة من الفيديو...")
+            if len(caption) <= 1024:
+                with open(out_path, "rb") as f:
+                    await message.reply_photo(photo=f, caption=caption)
+            else:
+                with open(out_path, "rb") as f:
+                    await message.reply_photo(photo=f)
+                for chunk_start in range(0, len(caption), 4000):
+                    await message.reply_text(caption[chunk_start:chunk_start + 4000])
+            # Send original video separately
             try:
                 with open(video_path, "rb") as f:
-                    await message.reply_document(document=f, caption="الفيديو الأصلي")
-            except Exception as e2:
-                logger.error(f"   Also failed as document: {e2}")
+                    await message.reply_video(video=f, supports_streaming=True)
+            except Exception:
+                pass
+    else:
+        # 📸 IMAGE-ONLY MODE: standard static post
+        await progress.edit_text("🎨 جاري تصميم المنشور...")
+        await loop.run_in_executor(None, generate_post, cfg, out_path)
 
+        if len(caption) <= 1024:
+            with open(out_path, "rb") as f:
+                await message.reply_photo(photo=f, caption=caption)
+        else:
+            with open(out_path, "rb") as f:
+                await message.reply_photo(photo=f)
+            for chunk_start in range(0, len(caption), 4000):
+                await message.reply_text(caption[chunk_start:chunk_start + 4000])
+
+    # Source link
     if news.get("source_url"):
         await message.reply_text(
             f"🔗 المصدر: {news['source_url']}",
@@ -211,7 +348,7 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
     for p in [img_path, out_path]:
         try: os.unlink(p)
         except: pass
-    # Note: video_path cleanup handled by caller (handle_video)
+    # Note: video_path cleanup handled by caller
 
 
 async def render_and_send_post(message, news, idx, total, progress):
@@ -492,7 +629,7 @@ async def handle_image_choice(update, ctx):
         await query.edit_message_text(
             f"📸 *تمام، ارفع الآن:*\n\n"
             f"• صورة (PNG/JPG) — تُستخدم في التصميم\n"
-            f"• فيديو (MP4/MOV) — سأستخرج إطار للتصميم + أرسل الفيديو كاملاً\n\n"
+            f"• فيديو (MP4/MOV) — سأدمجه داخل تصميم 4Ever (ريلز كامل)\n\n"
             f"العنوان: {news.get('headline_line1','')[:60]}\n\n"
             f"⏳ بانتظار محتواك...\n"
             f"لإلغاء: /cancel",
@@ -623,8 +760,8 @@ async def handle_video(update, ctx):
         news = pending["news"]
         progress = await update.message.reply_text(
             "🎬 *تم استلام الفيديو!*\n"
-            "📸 جاري استخراج إطار للتصميم...\n"
-            "🎥 وسأرسل الفيديو الأصلي بعد المنشور",
+            "🎨 سأدمجه داخل تصميم 4Ever الكامل\n"
+            "⏳ سيستغرق ~60-120 ثانية...",
             parse_mode="Markdown"
         )
         try:

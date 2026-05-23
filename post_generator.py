@@ -445,18 +445,20 @@ def draw_decorative_line(canvas, y, color):
 
 
 # ─── MAIN ENTRY POINT ───────────────────────────────────────────
-def generate_post(config: dict, output_path: str, seed: int = None) -> str:
+def generate_post(config: dict, output_path: str, seed: int = None,
+                  return_box: bool = False) -> str:
     """
-    Generate a 4Ever post image from config dict.
+    Generate a 4Ever post from config dict.
 
     Args:
         config: Dict matching config.json structure with main_asset.file
                 pointing to the actual image path.
         output_path: Where to save the final PNG.
         seed: Optional random seed for star particles.
+        return_box: If True, also return the (gx, gy, tw, th) bounding box of the main image.
 
     Returns:
-        Path to the generated PNG.
+        Path to the generated PNG, or (path, box_coords) tuple if return_box=True.
     """
     size = config["output"]["size"]
     bg_path = ROOT / config["background"]["file"]
@@ -497,4 +499,7 @@ def generate_post(config: dict, output_path: str, seed: int = None) -> str:
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     canvas.save(output_path, "PNG", quality=config["output"]["quality"], optimize=True)
+
+    if return_box:
+        return output_path, (gx, gy, tw, th)
     return output_path
