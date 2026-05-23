@@ -179,12 +179,47 @@ def paste_main_asset(canvas, asset_path, target_w, radius, glow_color, glow_alph
 
 # ─── Header ─────────────────────────────────────────────────────
 def draw_logo(canvas, text, color):
+    """Draw page logo: circular brand image (if exists) + text "4EVER".
+    Positioned top-right corner."""
     draw = ImageDraw.Draw(canvas, "RGBA")
     font = load_font("Orbitron.ttf", 44)
     W = canvas.size[0]
     bb = draw.textbbox((0, 0), text, font=font)
-    x = W - (bb[2] - bb[0]) - 50
+    text_w = bb[2] - bb[0]
     y = 38
+
+    # 🎨 Try to load circular brand logo
+    logo_path = ROOT / "assets" / "4ever_logo.png"
+    logo_size = 64  # circular logo diameter
+    margin_right = 50
+    gap_between = 14  # gap between logo and text
+
+    if logo_path.exists():
+        try:
+            logo_img = Image.open(logo_path).convert("RGBA")
+            # Resize to logo_size while preserving aspect (square)
+            logo_img = logo_img.resize((logo_size, logo_size), Image.LANCZOS)
+
+            # Calculate positions: text on right, logo to its LEFT
+            text_x = W - text_w - margin_right
+            logo_x = text_x - gap_between - logo_size
+            logo_y = y - 8  # center vertically with text
+
+            # Paste logo with alpha
+            canvas.paste(logo_img, (logo_x, logo_y), logo_img)
+
+            # Draw text after logo
+            first = text[0]; rest = text[1:]
+            fw = draw.textbbox((0, 0), first, font=font)[2]
+            draw.text((text_x, y), first, font=font, fill=hex_to_rgba(color))
+            draw.text((text_x + fw, y), rest, font=font, fill=(255, 255, 255, 255))
+            return
+        except Exception as e:
+            # Fallback to text-only if logo fails
+            pass
+
+    # Fallback: text only (original behavior)
+    x = W - text_w - margin_right
     first = text[0]; rest = text[1:]
     fw = draw.textbbox((0, 0), first, font=font)[2]
     draw.text((x, y), first, font=font, fill=hex_to_rgba(color))

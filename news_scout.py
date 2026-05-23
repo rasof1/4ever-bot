@@ -674,32 +674,57 @@ def validate_post_with_ai(news_data, image_path):
         return (True, [], str(e))
 
 
-def acquire_validated_image(news_data, save_path, max_attempts=3):
+def acquire_validated_image(news_data, save_path, max_attempts=5):
     """
-    Smart image acquisition with AI validation.
-    Tries to get an image AND verify it matches the news.
-    If validation fails, tries AI generation as fallback.
+    Smart image acquisition - prefer REAL search results over AI generation.
+    Validates with AI vision (90%+ match required).
+
+    Strategy:
+    1-2: search with original query (Bing → DuckDuckGo)
+    3:   search with broader query (drop adjectives)
+    4:   AI generation with detailed prompt
+    5:   AI generation with category hints
+
+    Last successful image kept even if validator complains (prevent dead-end).
     """
+    original_query = news_data.get("image_query", "")
+    headline_en = news_data.get("headline_line2_en", "")
+    source = news_data.get("source", "")
+
+    best_save_path = save_path
+    has_any_image = False
+
     for attempt in range(max_attempts):
         log.info(f"📸 Image attempt {attempt+1}/{max_attempts}")
+        got = False
 
         if attempt == 0:
-            # First try: search
-            got = find_or_generate_image(news_data, save_path)
+            # Original specific query
+            got = find_or_generate_image_search_only(news_data, save_path)
         elif attempt == 1:
-            # Second try: force AI generation with detailed prompt
-            ai_prompt = news_data.get("image_prompt") or news_data.get("image_query") or "tech product"
+            # Try broader query (just product name + 'photo')
+            if headline_en:
+                broader = {**news_data, "image_query": f"{headline_en} photo"}
+                got = find_or_generate_image_search_only(broader, save_path)
+        elif attempt == 2:
+            # Try with company + product
+            if source and headline_en:
+                broader = {**news_data, "image_query": f"{source} {headline_en} announcement"}
+                got = find_or_generate_image_search_only(broader, save_path)
+        elif attempt == 3:
+            # AI generation - high quality
+            ai_prompt = news_data.get("image_prompt") or original_query or "tech product"
             got = generate_ai_image(ai_prompt, save_path)
         else:
-            # Third: regenerate with category hint
+            # Last: AI with category hints
             cat = news_data.get("category", "ai")
             category_hints = {
-                "phone": "modern smartphone product render dark background",
-                "gaming": "gaming console controller futuristic neon",
-                "ai": "artificial intelligence neural network abstract",
-                "hardware": "computer chip GPU close up dramatic lighting",
-                "leak": "mysterious tech device leaked render",
-                "emerging": "futuristic technology concept",
+                "phone": "modern smartphone product render dark background dramatic",
+                "gaming": "gaming console controller futuristic neon lighting",
+                "ai": "artificial intelligence robot futuristic abstract",
+                "hardware": "computer chip GPU close-up cinematic lighting",
+                "leak": "tech device leaked render mysterious",
+                "emerging": "futuristic technology concept neon",
             }
             ai_prompt = f"{news_data.get('image_prompt', '')} {category_hints.get(cat, '')}"
             got = generate_ai_image(ai_prompt, save_path)
@@ -707,14 +732,32 @@ def acquire_validated_image(news_data, save_path, max_attempts=3):
         if not got:
             continue
 
+        has_any_image = True
+
         # Validate
         is_valid, issues, reason = validate_post_with_ai(news_data, save_path)
         if is_valid:
+            log.info(f"   ✅ Image accepted on attempt {attempt+1}")
             return True
 
         log.warning(f"   Image rejected by AI validator: {reason}")
-        # Continue to next attempt
 
-    # Last resort: keep whatever we have
     log.warning("   Using last attempted image despite validation issues")
-    return os.path.exists(save_path)
+    return has_any_image and os.path.exists(save_path)
+
+
+def find_or_generate_image_search_only(news_data, save_path):
+    """Search-only variant (no AI gen fallback inside)."""
+    query = news_data.get("image_query", "")
+    if not query:
+        return False
+    log.info(f"🔍 Searching: {query}")
+    urls = search_images_via_bing(query)
+    if not urls:
+        urls = search_images_via_duckduckgo(query)
+
+    for i, url in enumerate(urls[:7]):  # Try more candidates
+        log.info(f"   🔗 Try {i+1}: {url[:80]}")
+        if try_download_image(url, save_path):
+            return True
+    return False

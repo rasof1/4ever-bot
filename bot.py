@@ -129,7 +129,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 2.4 (لغات متعددة + فيديو)"
+        "• الإصدار: 2.5 (ريلز + شعار صفحة)"
     )
     await update.message.reply_text(msg)
 
@@ -200,21 +200,23 @@ async def composite_video_into_design(design_png, design_box, video_path, output
             "-loop", "1", "-i", design_png,          # input 0: design as static
             "-i", video_path,                         # input 1: source video
             "-filter_complex", filter_complex,
-            "-map", "[out]",                         # video from filter
-            "-map", "1:a?",                          # audio from source (optional)
+            "-map", "[out]",
+            "-map", "1:a?",
             "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "23",
+            "-preset", "ultrafast",                  # 🚀 fastest encoding
+            "-crf", "28",                            # slightly lower quality, much faster
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
-            "-b:a", "128k",
+            "-b:a", "96k",                           # smaller audio
+            "-ar", "44100",
             "-shortest",
             "-movflags", "+faststart",
-            "-t", "60",                              # Cap at 60 seconds
+            "-t", "120",                             # Cap at 2 minutes max
+            "-threads", "0",                         # use all cores
             output_mp4
         ]
-        logger.info(f"   Running ffmpeg composite...")
-        result = subprocess.run(cmd, capture_output=True, timeout=180)
+        logger.info(f"   Running ffmpeg composite (ultrafast preset)...")
+        result = subprocess.run(cmd, capture_output=True, timeout=420)  # 7 min timeout
 
         if result.returncode != 0:
             stderr = result.stderr.decode('utf-8', errors='ignore')[-800:]
@@ -628,9 +630,16 @@ async def handle_image_choice(update, ctx):
         PENDING_NEWS[user_id]["awaiting_image"] = True
         await query.edit_message_text(
             f"📸 *تمام، ارفع الآن:*\n\n"
-            f"• صورة (PNG/JPG) — تُستخدم في التصميم\n"
-            f"• فيديو (MP4/MOV) — سأدمجه داخل تصميم 4Ever (ريلز كامل)\n\n"
-            f"العنوان: {news.get('headline_line1','')[:60]}\n\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🖼️ *صورة* (PNG/JPG)\n"
+            f"   • تُستخدم مباشرة في التصميم\n\n"
+            f"🎬 *فيديو* (MP4/MOV)\n"
+            f"   • يُدمج داخل تصميم 4Ever (ريلز كامل)\n"
+            f"   ⚠️ *الحد الأقصى للمدة: 2 دقيقة*\n"
+            f"   ⚠️ *الحد الأقصى للحجم: 100 MB*\n"
+            f"   ⏱ المعالجة تستغرق 2-4 دقائق\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"📰 العنوان: {news.get('headline_line1','')[:60]}\n\n"
             f"⏳ بانتظار محتواك...\n"
             f"لإلغاء: /cancel",
             parse_mode="Markdown"
@@ -758,15 +767,47 @@ async def handle_video(update, ctx):
     # Case 1: User uploading custom video for pending news
     if pending and pending.get("awaiting_image"):
         news = pending["news"]
+
+        # 🎯 Validate video constraints BEFORE downloading
+        file_obj = video or document
+        file_size_mb = (file_obj.file_size or 0) / (1024 * 1024)
+        duration_s = getattr(video, "duration", 0) if video else 0
+
+        # Check limits
+        MAX_SIZE_MB = 100
+        MAX_DURATION_S = 120  # 2 minutes
+
+        warnings = []
+        if file_size_mb > MAX_SIZE_MB:
+            warnings.append(f"⚠️ الحجم {file_size_mb:.1f}MB يتجاوز الحد الأقصى {MAX_SIZE_MB}MB")
+        if duration_s > MAX_DURATION_S:
+            warnings.append(f"⚠️ المدة {duration_s}s تتجاوز الحد الأقصى {MAX_DURATION_S}s (سيُقص لـ 2 دقيقة)")
+
+        if file_size_mb > MAX_SIZE_MB * 1.5:  # too large, abort
+            await update.message.reply_text(
+                f"❌ *الفيديو كبير جداً ({file_size_mb:.1f}MB)*\n\n"
+                f"الحد الأقصى المسموح: {MAX_SIZE_MB}MB\n"
+                f"الرجاء ضغط الفيديو أو رفع نسخة أصغر.",
+                parse_mode="Markdown"
+            )
+            PENDING_NEWS.pop(user_id, None)
+            return
+
+        warning_text = ""
+        if warnings:
+            warning_text = "\n" + "\n".join(warnings) + "\n"
+
         progress = await update.message.reply_text(
-            "🎬 *تم استلام الفيديو!*\n"
-            "🎨 سأدمجه داخل تصميم 4Ever الكامل\n"
-            "⏳ سيستغرق ~60-120 ثانية...",
+            f"🎬 *تم استلام الفيديو!*\n"
+            f"📊 الحجم: {file_size_mb:.1f}MB | المدة: {duration_s}s\n"
+            f"{warning_text}\n"
+            f"🎨 سأدمجه داخل تصميم 4Ever الكامل\n"
+            f"⏳ سيستغرق 2-4 دقائق على Render Free...\n"
+            f"☕ خذ كوب قهوة وأرجع!",
             parse_mode="Markdown"
         )
         try:
             # Download video
-            file_obj = video or document
             tg_file = await ctx.bot.get_file(file_obj.file_id)
 
             video_path = str(OUTPUT_DIR / f"vid_{user_id}_{os.getpid()}.mp4")
@@ -895,7 +936,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v2.4 (lang+video)...")
+    logger.info("🤖 Starting 4Ever Bot v2.5 (reels+brand-logo)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
