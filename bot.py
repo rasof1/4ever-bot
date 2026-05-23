@@ -645,63 +645,50 @@ async def handle_video(update, ctx):
 
 
 async def extract_video_frame(video_path, frame_path):
-    """Extract a frame from a video file. Uses ffmpeg if available, else PIL."""
+    """Extract a representative frame from a video.
+    Uses imageio-ffmpeg (Python package that ships a static ffmpeg binary).
+    """
     import subprocess
-    import shutil
 
-    # Try ffmpeg (best quality + speed)
-    if shutil.which("ffmpeg"):
-        try:
-            # Get duration to pick a frame around 25% of the way through
-            result = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-                capture_output=True, text=True, timeout=10
-            )
-            duration = 0.0
-            if result.returncode == 0 and result.stdout.strip():
-                try:
-                    duration = float(result.stdout.strip())
-                except ValueError:
-                    pass
-
-            seek_time = max(0.5, duration * 0.25) if duration > 0 else 1.0
-
-            # Extract frame at seek_time, scaled, high quality
-            subprocess.run(
-                ["ffmpeg", "-y", "-ss", str(seek_time), "-i", video_path,
-                 "-vframes", "1", "-q:v", "2",
-                 "-vf", "scale=1280:-1",
-                 frame_path],
-                capture_output=True, timeout=30
-            )
-
-            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 5000:
-                logger.info(f"   ✅ ffmpeg extracted frame at t={seek_time:.1f}s")
-                return True
-        except Exception as e:
-            logger.warning(f"   ffmpeg failed: {e}")
-
-    # Fallback: try opencv if available
     try:
-        import cv2
-        cap = cv2.VideoCapture(video_path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total > 0:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, total // 4)
-        ret, frame = cap.read()
-        cap.release()
-        if ret:
-            cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
-            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 5000:
-                logger.info(f"   ✅ opencv extracted frame")
-                return True
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.warning(f"   opencv failed: {e}")
+        import imageio_ffmpeg
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        logger.info(f"   Using ffmpeg from: {ffmpeg_bin}")
 
-    logger.error("   ❌ Could not extract frame - neither ffmpeg nor opencv available")
+        # Quick duration probe via ffmpeg (no ffprobe needed)
+        # We'll just seek to a few different times and pick the first that works
+        seek_candidates = ["2", "1", "0.5", "0"]
+        for seek in seek_candidates:
+            try:
+                result = subprocess.run(
+                    [ffmpeg_bin, "-y", "-ss", seek, "-i", video_path,
+                     "-vframes", "1", "-q:v", "2",
+                     "-vf", "scale=1280:720:force_original_aspect_ratio=decrease",
+                     frame_path],
+                    capture_output=True, timeout=45
+                )
+                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 5000:
+                    # Validate it's a real frame (not all black/empty)
+                    from PIL import Image, ImageStat
+                    with Image.open(frame_path) as img:
+                        rgb = img.convert("RGB")
+                        stat = ImageStat.Stat(rgb)
+                        mean = sum(stat.mean) / 3
+                        if mean > 10:  # not pitch-black
+                            logger.info(f"   ✅ Frame extracted at t={seek}s, mean={mean:.0f}")
+                            return True
+            except subprocess.TimeoutExpired:
+                logger.warning(f"   ffmpeg timeout at t={seek}s")
+                continue
+            except Exception as e:
+                logger.warning(f"   ffmpeg attempt at t={seek}s failed: {e}")
+                continue
+
+    except ImportError:
+        logger.error("   imageio-ffmpeg not installed")
+    except Exception as e:
+        logger.error(f"   Frame extraction error: {e}")
+
     return False
 
 
