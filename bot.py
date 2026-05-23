@@ -154,8 +154,10 @@ def parse_count(text):
     return 1
 
 
-async def render_with_image(message, news, img_path, progress):
-    """Render post using a specific image path (no auto-acquisition)."""
+async def render_with_image(message, news, img_path, progress, video_path=None):
+    """Render post using a specific image path.
+    If video_path provided, also send the original video AFTER the post.
+    """
     loop = asyncio.get_event_loop()
     await progress.edit_text("🎨 جاري تصميم المنشور...")
 
@@ -165,6 +167,7 @@ async def render_with_image(message, news, img_path, progress):
 
     caption = news.get("caption", "")
 
+    # 📸 Send the designed post image first
     if len(caption) <= 1024:
         with open(out_path, "rb") as f:
             await message.reply_photo(photo=f, caption=caption)
@@ -173,6 +176,27 @@ async def render_with_image(message, news, img_path, progress):
             await message.reply_photo(photo=f)
         for chunk_start in range(0, len(caption), 4000):
             await message.reply_text(caption[chunk_start:chunk_start + 4000])
+
+    # 🎬 If user provided a video, send it AFTER the post (so they have both)
+    if video_path and os.path.exists(video_path):
+        try:
+            await message.reply_text("🎬 الفيديو الأصلي:")
+            with open(video_path, "rb") as f:
+                await message.reply_video(
+                    video=f,
+                    supports_streaming=True,
+                    width=1280,
+                    height=720,
+                )
+            logger.info(f"   ✅ Original video sent ({os.path.getsize(video_path)//1024}KB)")
+        except Exception as e:
+            logger.warning(f"   Failed to send original video: {e}")
+            # Try as document if reply_video fails (e.g. format issue)
+            try:
+                with open(video_path, "rb") as f:
+                    await message.reply_document(document=f, caption="الفيديو الأصلي")
+            except Exception as e2:
+                logger.error(f"   Also failed as document: {e2}")
 
     if news.get("source_url"):
         await message.reply_text(
@@ -187,6 +211,7 @@ async def render_with_image(message, news, img_path, progress):
     for p in [img_path, out_path]:
         try: os.unlink(p)
         except: pass
+    # Note: video_path cleanup handled by caller (handle_video)
 
 
 async def render_and_send_post(message, news, idx, total, progress):
@@ -466,8 +491,8 @@ async def handle_image_choice(update, ctx):
         PENDING_NEWS[user_id]["awaiting_image"] = True
         await query.edit_message_text(
             f"📸 *تمام، ارفع الآن:*\n\n"
-            f"• صورة (PNG/JPG) — تُستخدم مباشرة\n"
-            f"• فيديو (MP4/MOV) — سأستخرج إطار جذاب منه\n\n"
+            f"• صورة (PNG/JPG) — تُستخدم في التصميم\n"
+            f"• فيديو (MP4/MOV) — سأستخرج إطار للتصميم + أرسل الفيديو كاملاً\n\n"
             f"العنوان: {news.get('headline_line1','')[:60]}\n\n"
             f"⏳ بانتظار محتواك...\n"
             f"لإلغاء: /cancel",
@@ -597,7 +622,9 @@ async def handle_video(update, ctx):
     if pending and pending.get("awaiting_image"):
         news = pending["news"]
         progress = await update.message.reply_text(
-            "🎬 *تم استلام الفيديو! جاري استخراج أفضل إطار...*",
+            "🎬 *تم استلام الفيديو!*\n"
+            "📸 جاري استخراج إطار للتصميم...\n"
+            "🎥 وسأرسل الفيديو الأصلي بعد المنشور",
             parse_mode="Markdown"
         )
         try:
@@ -621,9 +648,10 @@ async def handle_video(update, ctx):
                 return
 
             PENDING_NEWS.pop(user_id, None)
-            await render_with_image(update.message, news, frame_path, progress)
+            # 🎯 Pass video_path so the user's original video also gets sent after the post
+            await render_with_image(update.message, news, frame_path, progress, video_path=video_path)
 
-            # Cleanup
+            # Cleanup AFTER sending
             try: os.unlink(video_path)
             except: pass
 
