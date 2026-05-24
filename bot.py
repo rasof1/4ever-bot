@@ -151,7 +151,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 2.9 (ذكي + كانفس مطابق لمقاس الوسائط)"
+        "• الإصدار: 3.0 (OCR لقطات الشاشة + روابط جميع المنصات)"
     )
     await update.message.reply_text(msg)
 
@@ -730,15 +730,18 @@ async def handle_language_choice(update, ctx):
         await ctx.bot.send_message(chat_id=chat_id, text=f"❌ فشل: {str(e)[:200]}")
 
 
-async def generate_and_send_one_with_lang(message, user_id, idx, total, lang, ctx):
-    """Auto-mode generator with language."""
+async def generate_and_send_one_with_lang(message, user_id, idx, total, lang, ctx, dialect=None):
+    """Auto-mode generator with language + optional Arabic dialect."""
     progress = await message.reply_text(
         f"🔄 *جاري التوليد ({idx}/{total})...*\n🔍 البحث عن آخر ترند تقني...",
         parse_mode="Markdown"
     )
     try:
         loop = asyncio.get_event_loop()
-        news = await loop.run_in_executor(None, scout_news, "", lang)
+        news = await loop.run_in_executor(
+            None,
+            lambda: scout_news(extra_instructions="", lang=lang, dialect=dialect)
+        )
         await render_and_send_post(message, news, idx, total, progress)
     except Exception as e:
         logger.error(f"Error: {e}\n{traceback.format_exc()}")
@@ -747,7 +750,7 @@ async def generate_and_send_one_with_lang(message, user_id, idx, total, lang, ct
         )
 
 
-async def execute_reverse_url(message, user_id, url, full_text, lang, ctx):
+async def execute_reverse_url(message, user_id, url, full_text, lang, ctx, dialect=None):
     """Execute reverse URL with a chosen language. message=bot's progress message, user_id=original user."""
     progress = await message.reply_text("📥 جاري قراءة الرابط...")
     chat_id = message.chat_id
@@ -780,7 +783,26 @@ async def execute_reverse_url(message, user_id, url, full_text, lang, ctx):
         await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
 
 
-async def execute_reverse_text(message, user_id, text, lang, ctx):
+async def execute_smart_request(message, user_id, request_text, lang, ctx, dialect=None):
+    """Execute a smart natural-language request → smart_scout → ask for image → render."""
+    progress = await message.reply_text(
+        "🧠 *جاري فهم طلبك وتوليد المحتوى...*",
+        parse_mode="Markdown"
+    )
+    try:
+        loop = asyncio.get_event_loop()
+        news = await loop.run_in_executor(
+            None,
+            lambda: smart_scout(request_text, lang=lang, dialect=dialect)
+        )
+        # Ask if user has custom image/video
+        await ask_about_image(message, user_id, news, ctx, callback_kind="smart_followup")
+    except Exception as e:
+        logger.error(f"Smart request failed: {e}\n{traceback.format_exc()}")
+        await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
+
+
+async def execute_reverse_text(message, user_id, text, lang, ctx, dialect=None):
     progress = await message.reply_text("🤖 جاري تحويل النص لمنشور...")
     chat_id = message.chat_id
     try:
@@ -792,7 +814,7 @@ async def execute_reverse_text(message, user_id, text, lang, ctx):
         await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
 
 
-async def execute_reverse_photo_caption(message, user_id, caption, lang, ctx):
+async def execute_reverse_photo_caption(message, user_id, caption, lang, ctx, dialect=None):
     progress = await message.reply_text("🤖 جاري تحويل المحتوى لمنشور...")
     chat_id = message.chat_id
     try:
@@ -973,16 +995,56 @@ async def handle_photo(update, ctx):
             PENDING_NEWS.pop(user_id, None)
         return
 
-    # Case 2: Screenshot with caption → ask language first
+    # Case 2: Screenshot - either with caption or extract content from image
     caption = (update.message.caption or "").strip()
-    if not caption or len(caption) < 10:
-        await update.message.reply_text(
-            "📸 وصلتني الصورة. لكن أحتاج وصفاً مع الصورة (في الكابشن) "
-            "لأعرف الخبر. أعد الإرسال مع كابشن يصف الخبر."
-        )
+
+    if caption and len(caption) >= 10:
+        # User provided caption - use it
+        await ask_about_language(update.message, ctx, "photo_caption", {"caption": caption})
         return
 
-    await ask_about_language(update.message, ctx, "photo_caption", {"caption": caption})
+    # 🆕 No caption (or too short) → extract content from screenshot via OCR
+    progress = await update.message.reply_text(
+        "📸 *وصلتني لقطة الشاشة!*\n"
+        "🔍 جاري قراءة محتواها واستخراج المعلومات...\n"
+        "⏳ لحظات...",
+        parse_mode="Markdown"
+    )
+    try:
+        photo = update.message.photo[-1]
+        tg_file = await ctx.bot.get_file(photo.file_id)
+        screenshot_path = str(OUTPUT_DIR / f"screen_{user_id}_{os.getpid()}.jpg")
+        await tg_file.download_to_drive(screenshot_path)
+
+        loop = asyncio.get_event_loop()
+        extracted = await loop.run_in_executor(None, extract_post_from_screenshot, screenshot_path)
+
+        # Clean up screenshot
+        try: os.unlink(screenshot_path)
+        except: pass
+
+        if not extracted or len(extracted) < 50:
+            await progress.edit_text(
+                "⚠️ لم أتمكن من استخراج محتوى واضح من الصورة.\n\n"
+                "حاول:\n"
+                "• إرسال الصورة مع كابشن يصف الخبر\n"
+                "• أو إرسال صورة أوضح بنصوص قابلة للقراءة"
+            )
+            return
+
+        await progress.edit_text(
+            f"✅ *استخرجت المحتوى:*\n\n"
+            f"```\n{extracted[:400]}{'...' if len(extracted) > 400 else ''}\n```\n\n"
+            f"🌐 الآن اختر اللغة...",
+            parse_mode="Markdown"
+        )
+
+        # Route to language picker (use the extracted text as if it were caption)
+        await ask_about_language(update.message, ctx, "photo_caption", {"caption": extracted})
+
+    except Exception as e:
+        logger.error(f"Screenshot OCR failed: {e}\n{traceback.format_exc()}")
+        await progress.edit_text(f"❌ فشل قراءة الصورة: {str(e)[:200]}")
 
 
 async def handle_video(update, ctx):
@@ -1265,7 +1327,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v2.9 (smart+fixed-dialects+true-adaptive-canvas)...")
+    logger.info("🤖 Starting 4Ever Bot v3.0 (OCR+all-social-platforms+all-bugs-fixed)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))

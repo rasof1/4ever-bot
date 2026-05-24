@@ -710,113 +710,151 @@ def reverse_scout(user_content, lang="ar", dialect=None):
 # URL FETCHING (Facebook, Twitter, regular sites)
 # ═══════════════════════════════════════════════════════════════
 
+def _try_fetch(url, headers, timeout=15):
+    """Single fetch attempt with given headers."""
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        if r.status_code == 200 and r.text:
+            return r.text
+    except Exception:
+        pass
+    return None
+
+
+def _strip_html(html):
+    """Extract clean text from HTML, preserving important content."""
+    if not html:
+        return ""
+    # Remove scripts and styles
+    text = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
+    # Extract meta description and og:description
+    extras = []
+    for pattern in [
+        r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)',
+        r'<title>([^<]+)</title>',
+    ]:
+        for m in re.findall(pattern, html, re.IGNORECASE):
+            extras.append(m[:500])
+    # Strip tags
+    text = re.sub(r'<[^>]+>', ' ', text)
+    # Decode entities
+    import html as html_module
+    text = html_module.unescape(text)
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Prepend extras
+    if extras:
+        text = " | ".join(extras) + " | " + text
+    return text[:6000]
+
+
 def fetch_url_content(url):
+    """Smart URL content extraction supporting Facebook/Twitter/Instagram/TikTok/YouTube/general."""
     log.info(f"📥 Fetching: {url[:80]}")
 
-    fetch_attempts = [
-        {"url": url, "headers": {
-            "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-            "Accept": "text/html,application/xhtml+xml",
-        }},
-        {"url": url, "headers": {
-            "User-Agent": "Twitterbot/1.0",
-            "Accept": "text/html",
-        }},
-        {"url": url, "headers": {
-            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-            "Accept": "text/html",
-        }},
-        {"url": url, "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html",
-            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-        }},
+    url_lower = url.lower()
+    transformed_urls = [url]  # Try original first
+
+    # 🌐 Platform-specific URL transformations
+    if 'facebook.com' in url_lower or 'fb.com' in url_lower or 'fb.watch' in url_lower:
+        # Try mbasic (mobile) version - much easier to scrape
+        mbasic = re.sub(r'(www\.|m\.|web\.)?facebook\.com', 'mbasic.facebook.com', url)
+        if mbasic != url:
+            transformed_urls.insert(0, mbasic)
+
+    elif 'twitter.com' in url_lower or 'x.com' in url_lower:
+        # Try nitter alternatives (privacy frontends - work without auth)
+        for nitter in ['nitter.net', 'nitter.privacydev.net', 'nitter.poast.org']:
+            transformed = re.sub(r'(twitter|x)\.com', nitter, url)
+            transformed_urls.append(transformed)
+        # Also try vxtwitter (returns rich meta tags)
+        transformed_urls.append(re.sub(r'(twitter|x)\.com', 'vxtwitter.com', url))
+        transformed_urls.append(re.sub(r'(twitter|x)\.com', 'fxtwitter.com', url))
+
+    elif 'instagram.com' in url_lower:
+        # Try Picuki (Instagram viewer) or imginn
+        # Extract post ID
+        m = re.search(r'instagram\.com/(p|reel|tv)/([A-Za-z0-9_-]+)', url)
+        if m:
+            post_id = m.group(2)
+            transformed_urls.insert(0, f"https://imginn.com/p/{post_id}/")
+            transformed_urls.insert(1, f"https://www.picuki.com/media/{post_id}")
+        # Also try ddinstagram
+        transformed_urls.append(url.replace('instagram.com', 'ddinstagram.com'))
+
+    elif 'tiktok.com' in url_lower:
+        # vxtiktok / tnktok return easier-to-scrape pages
+        transformed_urls.insert(0, url.replace('tiktok.com', 'vxtiktok.com'))
+        transformed_urls.insert(1, url.replace('tiktok.com', 'tnktok.com'))
+
+    elif 'youtube.com' in url_lower or 'youtu.be' in url_lower:
+        # YouTube oembed gives clean title + description
+        from urllib.parse import quote
+        oembed = f"https://www.youtube.com/oembed?url={quote(url)}&format=json"
+        transformed_urls.insert(0, oembed)
+
+    # 🤖 Bot user-agents that work well for social sites
+    user_agents = [
+        # Facebook's own crawler - works on FB, Insta, generic sites
+        {"User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+         "Accept": "text/html,application/xhtml+xml"},
+        # Twitter's crawler
+        {"User-Agent": "Twitterbot/1.0",
+         "Accept": "text/html"},
+        # Telegram's crawler  
+        {"User-Agent": "TelegramBot (like TwitterBot)",
+         "Accept": "text/html"},
+        # WhatsApp
+        {"User-Agent": "WhatsApp/2.0",
+         "Accept": "text/html"},
+        # Discord
+        {"User-Agent": "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)",
+         "Accept": "text/html"},
+        # Google crawler
+        {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+         "Accept": "text/html"},
+        # Chrome
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+         "Accept-Language": "en-US,en;q=0.9,ar;q=0.8"},
     ]
 
-    html = ""
-    final_url = url
-    for i, attempt in enumerate(fetch_attempts):
-        try:
-            log.info(f"   Attempt {i+1}/{len(fetch_attempts)}")
-            r = requests.get(attempt["url"], headers=attempt["headers"],
-                             timeout=20, allow_redirects=True)
-            if r.status_code == 200 and len(r.text) > 500:
-                html = r.text
-                final_url = r.url
-                log.info(f"   ✅ Got {len(html)} chars")
-                break
-            else:
-                log.warning(f"   Status {r.status_code}, size {len(r.text)}")
-        except Exception as e:
-            log.warning(f"   Failed: {e}")
+    # Try each URL with each user-agent
+    best_content = ""
+    for try_url in transformed_urls[:6]:  # Cap at 6 attempts
+        for ua in user_agents[:3]:  # First 3 UAs per URL
+            log.info(f"   Trying {try_url[:60]} with {ua['User-Agent'][:30]}")
+            html = _try_fetch(try_url, ua)
+            if html:
+                text = _strip_html(html)
+                if len(text) > 200:
+                    log.info(f"   ✅ Got {len(text)} chars from {try_url[:60]}")
+                    if len(text) > len(best_content):
+                        best_content = text
+                    if len(text) > 1000:
+                        return best_content  # Good enough, stop early
 
-    if not html:
+    # If still not enough, try Jina AI Reader (handles JS-rendered pages)
+    if len(best_content) < 500:
+        log.info(f"   Falling back to Jina AI Reader")
+        jina_url = f"https://r.jina.ai/{url}"
         try:
-            log.info(f"   🔄 Trying Jina AI reader fallback...")
-            r = requests.get(f"https://r.jina.ai/{url}", timeout=30,
-                             headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code == 200 and len(r.text) > 200:
+            r = requests.get(jina_url, timeout=20)
+            if r.status_code == 200 and len(r.text) > len(best_content):
+                best_content = r.text[:6000]
                 log.info(f"   ✅ Jina returned {len(r.text)} chars")
-                return {
-                    "title": "", "description": "",
-                    "body_text": r.text[:5000], "url": url,
-                }
         except Exception as e:
             log.warning(f"   Jina failed: {e}")
-        return {"title": "", "description": "", "body_text": "", "url": url,
-                "error": "All fetch attempts failed"}
 
-    title_m = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
-    og_title_m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-    og_desc_m = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    if not best_content:
+        log.warning(f"   ❌ All fetch attempts failed")
+        return f"رابط: {url}"  # At minimum, give Gemini the URL itself
 
-    title = (og_title_m.group(1) if og_title_m else (title_m.group(1) if title_m else "")).strip()
-    desc = (og_desc_m.group(1) if og_desc_m else "").strip()
+    return best_content
 
-    cleaned = re.sub(r'<script.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    cleaned = re.sub(r'<style.*?</style>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
-    text_only = re.sub(r'<[^>]+>', ' ', cleaned)
-    text_only = re.sub(r'\s+', ' ', text_only).strip()
-
-    log.info(f"   📰 Title: {title[:60]}")
-    log.info(f"   📝 Body: {len(text_only)} chars")
-
-    return {
-        "title": title, "description": desc,
-        "body_text": text_only[:5000], "url": final_url,
-    }
-
-
-# ═══════════════════════════════════════════════════════════════
-# FINAL VALIDATOR — checks image+headline coherence
-# ═══════════════════════════════════════════════════════════════
-
-
-
-def _is_image_visually_meaningful(image_path):
-    """Quick check: reject images that are mostly single-color or empty.
-    Returns True if image has enough visual variety to be useful."""
-    try:
-        from PIL import Image, ImageStat
-        with Image.open(image_path) as img:
-            img = img.convert("RGB")
-            # Resize for fast analysis
-            img.thumbnail((200, 200))
-            stat = ImageStat.Stat(img)
-            stddev = sum(stat.stddev) / 3
-            # Real photos have stddev > 30 typically; empty/monochrome < 20
-            if stddev < 25:
-                log.warning(f"   Visual stddev too low: {stddev:.1f}")
-                return False
-            # Also check if too dark (mostly black)
-            mean = sum(stat.mean) / 3
-            if mean < 20:
-                log.warning(f"   Image too dark: mean={mean:.1f}")
-                return False
-            return True
-    except Exception as e:
-        log.warning(f"   Visual check failed: {e}")
-        return True  # If check fails, allow it (don't block)
 
 
 def validate_post_with_ai(news_data, image_path):
@@ -894,6 +932,131 @@ def validate_post_with_ai(news_data, image_path):
     except Exception as e:
         log.warning(f"   Validator error: {e}")
         return (True, [], str(e))
+
+
+def _is_image_visually_meaningful(image_path):
+    """Quick check: reject images that are mostly single-color or empty.
+    Returns True if image has enough visual variety to be useful."""
+    try:
+        from PIL import Image, ImageStat
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            img.thumbnail((200, 200))
+            stat = ImageStat.Stat(img)
+            stddev = sum(stat.stddev) / 3
+            if stddev < 25:
+                log.warning(f"   Visual stddev too low: {stddev:.1f}")
+                return False
+            mean = sum(stat.mean) / 3
+            if mean < 20:
+                log.warning(f"   Image too dark: mean={mean:.1f}")
+                return False
+            return True
+    except Exception as e:
+        log.warning(f"   Visual check failed: {e}")
+        return True
+
+
+def extract_post_from_screenshot(image_path):
+    """Use Gemini Vision to extract post content from a screenshot.
+    Returns text description suitable for reverse_scout or smart_scout.
+    Handles: WhatsApp/Telegram/social media/website screenshots in any language.
+    """
+    import base64
+    log.info(f"📸 OCR via Gemini Vision: {image_path}")
+
+    try:
+        with open(image_path, "rb") as f:
+            img_bytes = f.read()
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+    except Exception as e:
+        log.error(f"   Cannot read image: {e}")
+        return None
+
+    ext = image_path.lower().rsplit(".", 1)[-1]
+    mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+
+    prompt = """انت محلل صور خبير. هذه لقطة شاشة من سوشيال ميديا أو موقع أو محادثة.
+
+مهمتك:
+1. اقرأ كل النصوص العربية والإنجليزية بدقة
+2. استخرج المحتوى الرئيسي للمنشور
+3. لاحظ أي روابط/شركات/منتجات/أشخاص
+4. صف الصور البصرية بإيجاز
+
+أرجع JSON فقط (بدون code fences):
+{
+  "extracted_text": "كل النص بالعربية والإنجليزية",
+  "main_topic": "ملخص في جملة واحدة",
+  "key_points": ["نقطة 1", "نقطة 2", "نقطة 3"],
+  "platform": "facebook|twitter|instagram|telegram|whatsapp|website|other",
+  "mentions": ["شركات أو منتجات"],
+  "visual_description": "وصف بصري"
+}"""
+
+    body = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime, "data": img_b64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.3,
+            "thinkingConfig": {"thinkingBudget": 0},
+            "response_mime_type": "application/json",
+        }
+    }
+
+    for model in FALLBACK_MODELS:
+        try:
+            url = f"{GEMINI_API_BASE}/{model}:generateContent?key={GEMINI_API_KEY}"
+            r = requests.post(url, json=body, timeout=30)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                continue
+            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            if not text:
+                continue
+            text = text.strip().strip("```json").strip("```").strip()
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                m = re.search(r'\{.*?"extracted_text".*?\}', text, re.DOTALL)
+                if not m:
+                    continue
+                try:
+                    parsed = json.loads(m.group(0))
+                except Exception:
+                    continue
+
+            parts = []
+            if parsed.get("main_topic"):
+                parts.append(f"الموضوع: {parsed['main_topic']}")
+            if parsed.get("extracted_text"):
+                parts.append(f"النص الكامل: {parsed['extracted_text'][:2000]}")
+            if parsed.get("key_points"):
+                parts.append("النقاط الرئيسية: " + " | ".join(parsed['key_points'][:5]))
+            if parsed.get("mentions"):
+                parts.append("ذُكر: " + ", ".join(parsed['mentions'][:5]))
+            if parsed.get("visual_description"):
+                parts.append(f"بصرياً: {parsed['visual_description'][:300]}")
+            if parsed.get("platform") and parsed["platform"] != "other":
+                parts.append(f"المنصة: {parsed['platform']}")
+
+            extracted = "\n".join(parts)
+            log.info(f"   ✅ Extracted {len(extracted)} chars via {model}")
+            return extracted if extracted.strip() else None
+        except Exception as e:
+            log.warning(f"   {model} OCR failed: {str(e)[:100]}")
+            continue
+
+    log.error("   All Vision models failed for OCR")
+    return None
 
 
 def acquire_validated_image(news_data, save_path, max_attempts=7):
