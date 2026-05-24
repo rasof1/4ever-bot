@@ -17,7 +17,7 @@ from telegram.ext import (
 from post_generator import generate_post, generate_post_layers
 from news_scout import (
     scout_news, download_image, reverse_scout, fetch_url_content,
-    acquire_validated_image, LANG_INSTRUCTIONS,
+    acquire_validated_image, LANG_INSTRUCTIONS, DIALECTS,
 )
 
 logging.basicConfig(
@@ -151,7 +151,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 2.8 (لهجات + صور حقيقية أولاً + كانفس مرن)"
+        "• الإصدار: 2.9 (ذكي + كانفس مطابق لمقاس الوسائط)"
     )
     await update.message.reply_text(msg)
 
@@ -547,6 +547,8 @@ async def ask_about_language(message, ctx, callback_kind, payload):
                 await execute_reverse_text(progress, user_id, payload["text"], default_lang, ctx, dialect=default_dialect)
             elif callback_kind == "photo_caption":
                 await execute_reverse_photo_caption(progress, user_id, payload["caption"], default_lang, ctx, dialect=default_dialect)
+            elif callback_kind == "smart":
+                await execute_smart_request(progress, user_id, payload["request"], default_lang, ctx, dialect=default_dialect)
         except Exception as e:
             logger.error(f"Direct lang dispatch failed: {e}\n{traceback.format_exc()}")
             await message.reply_text(f"❌ فشل: {str(e)[:200]}")
@@ -662,6 +664,8 @@ async def handle_dialect_choice(update, ctx):
             await execute_reverse_text(progress, user_id, payload["text"], "ar", ctx, dialect=dialect)
         elif callback_kind == "photo_caption":
             await execute_reverse_photo_caption(progress, user_id, payload["caption"], "ar", ctx, dialect=dialect)
+        elif callback_kind == "smart":
+            await execute_smart_request(progress, user_id, payload["request"], "ar", ctx, dialect=dialect)
     except Exception as e:
         logger.error(f"Dialect dispatch failed: {e}\n{traceback.format_exc()}")
         await ctx.bot.send_message(chat_id, f"❌ فشل: {str(e)[:200]}")
@@ -1123,21 +1127,47 @@ def get_video_dimensions(video_path):
 
 
 def choose_canvas_size_for_aspect(media_w, media_h):
-    """Choose canvas size (W, H) based on media aspect ratio.
-    - Wide/square (>= 0.85): 1080x1080 (square IG post)
-    - Tall (< 0.85): 1080x1920 (vertical reels)
+    """Choose canvas size (W, H) that MATCHES the media's aspect ratio.
+    The frame design adapts to the media, NOT the other way around.
+
+    Rules:
+    - Canvas width is ALWAYS 1080 (standard social media width)
+    - Canvas height is calculated so the media fits naturally with room for:
+      * Header (~175px)
+      * Headline area (~400px)
+      * Total chrome: 575px reserved for branding/headline
+    - The media gets the SAFE width (~85%) and proportional height
+    - Final canvas height = media_aspect_height + 575px chrome
+
+    Bounded:
+    - Min height 1080 (don't go shorter than square)
+    - Max height 2400 (don't go absurdly tall)
     """
     if not media_w or not media_h:
-        return 1080, 1080  # default square
-    aspect = media_w / media_h
-    if aspect < 0.85:
-        # Portrait video → vertical canvas
-        logger.info(f"   📐 Tall aspect ({aspect:.2f}) → 1080x1920 canvas")
-        return 1080, 1920
-    else:
-        # Landscape or square → square canvas
-        logger.info(f"   📐 Wide aspect ({aspect:.2f}) → 1080x1080 canvas")
         return 1080, 1080
+
+    aspect = media_w / media_h
+
+    # Media will be displayed at SAFE_WIDTH (85% of 1080 = 918)
+    media_display_w = int(1080 * 0.85)  # 918
+    # Required height for media at this width
+    media_display_h = int(media_display_w / aspect)
+
+    # Chrome reserved (header + headline area + padding)
+    CHROME_TOP = 175      # header
+    CHROME_BOTTOM = 400   # headline + decorations
+    PADDING = 50          # extra breathing room
+
+    target_h = media_display_h + CHROME_TOP + CHROME_BOTTOM + PADDING
+
+    # Clamp to reasonable bounds
+    target_h = max(1080, min(target_h, 2400))
+
+    # Round to even number (required by some video codecs)
+    target_h = (target_h // 2) * 2
+
+    logger.info(f"   📐 Media aspect {aspect:.2f} → media {media_display_w}x{media_display_h} → canvas 1080x{target_h}")
+    return 1080, target_h
 
 
 def get_image_dimensions(img_path):
@@ -1235,7 +1265,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v2.8 (dialects+search-first-images+fixed-aspect)...")
+    logger.info("🤖 Starting 4Ever Bot v2.9 (smart+fixed-dialects+true-adaptive-canvas)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))

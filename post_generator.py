@@ -87,51 +87,48 @@ def add_star_particles(canvas, count=35, seed=4):
 
 # ─── Main asset ─────────────────────────────────────────────────
 def paste_main_asset(canvas, asset_path, target_w, radius, glow_color, glow_alpha):
-    """Fit the image inside the safe zone, FULLY VISIBLE (no cropping).
-    For odd aspect ratios, adds black padding inside the rounded frame.
-    Returns (gx, gy, target_w, target_h) - the OUTER frame coords.
+    """Fit the image in safe zone. Adapts to image's NATIVE aspect ratio.
+    
+    Since canvas is sized to match media aspect (via choose_canvas_size_for_aspect),
+    the image fills the safe area naturally with no/minimal padding.
     """
     img = Image.open(asset_path).convert("RGB")
+    img_w, img_h = img.size
     W, H = canvas.size
 
-    # 🎯 SAFE ZONE BOUNDARIES - scale with canvas height
-    # For square (1080x1080):  top=175, bottom=680 → 505px
-    # For tall (1080x1920):    top=175, bottom=1520 → 1345px
-    # Layout: header 175px, image area (variable), headline 400px reserved
     SAFE_TOP = 175
-    HEADLINE_RESERVED = 400  # space reserved at bottom for headline + decorations
+    HEADLINE_RESERVED = 400
     SAFE_BOTTOM = H - HEADLINE_RESERVED
-    SAFE_WIDTH = int(W * 0.85)  # ~918px wide on 1080 canvas
+    SAFE_WIDTH = int(W * 0.85)
 
     available_h = SAFE_BOTTOM - SAFE_TOP
     available_w = SAFE_WIDTH
 
-    # ===== FRAME size: use full available area (always) =====
-    # This makes the frame consistent regardless of image aspect ratio
-    target_w = available_w
-    target_h = available_h
-
-    # ===== IMAGE size inside frame: FIT (no crop) =====
-    img_w, img_h = img.size
+    # ⭐ Choose frame size to FIT image aspect inside available area (no crop, no excessive pad)
     aspect = img_w / img_h
-    frame_aspect = target_w / target_h
+    avail_aspect = available_w / available_h
 
-    if aspect > frame_aspect:
-        # Image is wider than frame → fit by width, pad top/bottom
-        fit_w = target_w
-        fit_h = int(fit_w / aspect)
+    if aspect >= avail_aspect:
+        # Image is wider than available → frame width = available_w
+        frame_w = available_w
+        frame_h = int(frame_w / aspect)
     else:
-        # Image is taller than frame → fit by height, pad left/right
-        fit_h = target_h
-        fit_w = int(fit_h * aspect)
+        # Image is taller than available → frame height = available_h
+        frame_h = available_h
+        frame_w = int(frame_h * aspect)
 
-    img = img.resize((fit_w, fit_h), Image.LANCZOS)
+    target_w = frame_w
+    target_h = frame_h
+
+    # Resize image to fit perfectly inside frame (no padding needed since frame matches aspect)
+    img = img.resize((target_w, target_h), Image.LANCZOS)
 
     # Center horizontally
     gx = (W - target_w) // 2
-    gy = SAFE_TOP
+    # Vertically: center in available space
+    gy = SAFE_TOP + (available_h - target_h) // 2
 
-    # 🎨 Enhanced glow effect
+    # 🎨 Glow effect
     glow_size = 50
     glow = Image.new("RGBA",
                      (target_w + glow_size * 2, target_h + glow_size * 2),
@@ -143,29 +140,14 @@ def paste_main_asset(canvas, asset_path, target_w, radius, glow_color, glow_alph
     glow = glow.filter(ImageFilter.GaussianBlur(25))
     canvas.paste(glow, (gx - glow_size, gy - glow_size), glow)
 
-    # 🎨 Draw black background frame (so padded areas show black not bg)
-    frame_bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 255))
-    mask_outer = Image.new("L", (target_w, target_h), 0)
-    ImageDraw.Draw(mask_outer).rounded_rectangle((0, 0, target_w, target_h), radius=radius, fill=255)
-    canvas.paste(frame_bg, (gx, gy), mask_outer)
+    # Rounded mask + paste image
+    mask = Image.new("L", (target_w, target_h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, target_w, target_h), radius=radius, fill=255)
 
-    # Paste image CENTERED within the frame (with padding)
-    img_x = gx + (target_w - fit_w) // 2
-    img_y = gy + (target_h - fit_h) // 2
+    rgba_img = img.convert("RGBA")
+    canvas.paste(rgba_img, (gx, gy), mask)
 
-    # Apply rounded mask to the image area only (so corners stay rounded)
-    # Use the outer mask for the full frame look
-    canvas.paste(img, (img_x, img_y))
-
-    # Re-apply rounded mask to final composite area to keep corners clean
-    # by drawing a "punch-out" - actually just re-paste with mask
-    composite = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
-    composite_frame = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 255))
-    composite.paste(composite_frame, (0, 0))
-    composite.paste(img, ((target_w - fit_w) // 2, (target_h - fit_h) // 2))
-    canvas.paste(composite, (gx, gy), mask_outer)
-
-    # 🎨 Border outline
+    # Border outline
     draw = ImageDraw.Draw(canvas)
     draw.rounded_rectangle(
         (gx - 3, gy - 3, gx + target_w + 3, gy + target_h + 3),

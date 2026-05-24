@@ -610,6 +610,83 @@ REVERSE_PROMPT = r"""أنت محرر تقني محترف لصفحة عربية "
 """
 
 
+SMART_REQUEST_PROMPT = r"""أنت كاتب محتوى تقني محترف لصفحة عربية "4Ever".
+
+استلمت طلباً طبيعياً من المستخدم وأريدك أن تفهمه وتنتج منشوراً كاملاً.
+
+=== الطلب ===
+{user_request}
+==============
+
+مهمتك:
+1. **افهم بدقة ما يريده المستخدم**:
+   - شرح ميزة؟ مقارنة؟ توتوريال؟ خبر؟ برومبت؟ مراجعة منتج؟
+   - ابحث في الإنترنت إذا احتجت معلومات حديثة
+2. **أنتج المحتوى المناسب**:
+   - لو طلب "أقوى برومبت لـ X" → اكتب البرومبت بالإنجليزية في الكابشن + شرح بالعربية
+   - لو طلب "طريقة عمل X" → خطوات مفصّلة بحماس
+   - لو طلب "أفضل X" → قائمة مع شرح
+   - لو طلب "مقارنة X و Y" → جدول/قائمة فروقات
+   - لو طلب "ما رأيك في X" → تحليل صريح
+3. **العنوان (headline) يلخّص الموضوع** بشكل جذاب
+4. **image_query** يصف المحتوى الفعلي بدقة لإيجاد صورة مطابقة
+
+🔥 الكابشن - مليء بالحياة (نمط viral):
+
+📌 هوك قوي مع إيموجي:
+   🚨 / ⚡ / 💥 / 🤯 / 🔥
+
+📌 شرح حماسي (2-3 أسطر مع إيموجي)
+
+📌 لو الموضوع برومبت أو كود:
+   ```
+   البرومبت/الكود هنا
+   ```
+
+📌 لو الموضوع خطوات:
+   1️⃣ الخطوة الأولى
+   2️⃣ الخطوة الثانية
+   3️⃣ ...
+
+📌 لو الموضوع قائمة ميزات:
+   🎬 ...
+   🎨 ...
+   ⚡ ...
+   🧠 ...
+
+📌 لحظة إبهار: "واللي صراحة خلاني أنبهر..." 🔥
+
+📌 ✨ النقاط الذهبية:
+   ✨ نقطة 1
+   ✨ نقطة 2
+
+📌 خاتمة فلسفية 🚀
+
+📌 سؤال تفاعلي: "🤔 شو رأيكم؟ ... شاركونا 👇"
+
+📌 CTA: "💡 لمزيد من التحديثات الحصرية، اشترك في 4Ever الآن!"
+
+⚠️ 10-20 إيموجي على الأقل، فقرات منفصلة، لغة حماسية.
+
+أنتج JSON فقط:
+
+{{
+  "headline_line1": "عنوان عربي قصير - أقصى 35 حرف",
+  "headline_line2_ar": "السطر 2 - أقصى 18 حرف",
+  "headline_line2_en": "اسم إنجليزي قصير أو فارغ",
+  "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai|samsung|sony|nintendo|xiaomi|amd|intel|playstation|xbox|qualcomm|mcit|egypt|huawei|tesla|spacex",
+  "category": "ai|phone|gaming|hardware|leak|emerging",
+  "product_badge": "تسمية قصيرة",
+  "live_badge": "وصف قصير",
+  "caption": "كابشن كامل بالنمط أعلاه",
+  "hashtags": ["#وسم1", "#وسم2", "#وسم3", "#وسم4", "#وسم5"],
+  "image_prompt": "وصف بصري إنجليزي تفصيلي",
+  "image_query": "بحث محدد للصورة - شركة + منتج + نوع",
+  "source_url": ""
+}}
+"""
+
+
 def reverse_scout(user_content, lang="ar", dialect=None):
     """Convert user-provided content to 4Ever post in specified language/dialect."""
     lang_cfg = LANG_INSTRUCTIONS.get(lang, LANG_INSTRUCTIONS["ar"])
@@ -1011,3 +1088,25 @@ def find_or_generate_image_search_only(news_data, save_path):
             else:
                 log.info(f"   ⚠️ Image is empty/monochrome, trying next")
     return False
+
+
+
+def smart_scout(user_request, lang="ar", dialect=None):
+    """Smart scout: understand any natural-language request and produce a post.
+    Handles: tutorials, prompts, comparisons, opinions, lists, etc.
+    """
+    lang_cfg = LANG_INSTRUCTIONS.get(lang, LANG_INSTRUCTIONS["ar"])
+    lang_block = f"\n\n🌐 اللغة المطلوبة: {lang_cfg['caption_lang']}\n{lang_cfg['instruction']}\nأمثلة وسوم: {lang_cfg['hashtag_examples']}\n"
+
+    if lang == "ar" and dialect and dialect in DIALECTS:
+        dialect_cfg = DIALECTS[dialect]
+        lang_block += f"\n🗣️ اللهجة: {dialect_cfg['label']}\n{dialect_cfg['instruction']}\nالعنوان بالفصحى، الكابشن باللهجة.\n"
+
+    full_request = user_request[:5000] + lang_block
+    prompt = SMART_REQUEST_PROMPT.format(user_request=full_request)
+    result = _call_gemini(prompt, body_overrides={
+        "generationConfig": {"temperature": 0.8}
+    })
+    result["_lang"] = lang
+    result["_dialect"] = dialect
+    return _finalize_result(result)
