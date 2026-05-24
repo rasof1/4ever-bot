@@ -666,6 +666,34 @@ def fetch_url_content(url):
 # FINAL VALIDATOR — checks image+headline coherence
 # ═══════════════════════════════════════════════════════════════
 
+
+
+def _is_image_visually_meaningful(image_path):
+    """Quick check: reject images that are mostly single-color or empty.
+    Returns True if image has enough visual variety to be useful."""
+    try:
+        from PIL import Image, ImageStat
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            # Resize for fast analysis
+            img.thumbnail((200, 200))
+            stat = ImageStat.Stat(img)
+            stddev = sum(stat.stddev) / 3
+            # Real photos have stddev > 30 typically; empty/monochrome < 20
+            if stddev < 25:
+                log.warning(f"   Visual stddev too low: {stddev:.1f}")
+                return False
+            # Also check if too dark (mostly black)
+            mean = sum(stat.mean) / 3
+            if mean < 20:
+                log.warning(f"   Image too dark: mean={mean:.1f}")
+                return False
+            return True
+    except Exception as e:
+        log.warning(f"   Visual check failed: {e}")
+        return True  # If check fails, allow it (don't block)
+
+
 def validate_post_with_ai(news_data, image_path):
     """
     Final AI quality check: does the image actually match the news?
@@ -801,9 +829,14 @@ def acquire_validated_image(news_data, save_path, max_attempts=5):
         if not got:
             continue
 
+        # 🎯 Quick local check: reject mostly-empty/monochrome images BEFORE AI validation
+        if not _is_image_visually_meaningful(save_path):
+            log.warning(f"   🚫 Image is visually empty/monochrome")
+            continue
+
         has_any_image = True
 
-        # Validate
+        # Validate with AI
         is_valid, issues, reason = validate_post_with_ai(news_data, save_path)
         if is_valid:
             log.info(f"   ✅ Image accepted on attempt {attempt+1}")

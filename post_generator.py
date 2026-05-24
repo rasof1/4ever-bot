@@ -47,16 +47,24 @@ def draw_text_shadow(draw, xy, text, font, fill, is_ar=False, offset=2):
 
 
 # ─── Background ─────────────────────────────────────────────────
-def prepare_background(bg_path, size, darken=0.25):
+def prepare_background(bg_path, size, darken=0.25, height=None):
+    """Prepare background for canvas. If height is provided, creates a non-square canvas
+    (useful for portrait reels 1080x1920)."""
+    target_w = size if isinstance(size, int) else size[0]
+    target_h = height if height else (size if isinstance(size, int) else size[1] if len(size) > 1 else size)
+    if height is None and isinstance(size, int):
+        target_h = size
+
     bg = Image.open(bg_path).convert("RGB")
     bw, bh = bg.size
-    scale = max(size / bw, size / bh)
+    # Scale to cover target dimensions
+    scale = max(target_w / bw, target_h / bh)
     bg = bg.resize((int(bw * scale), int(bh * scale)), Image.LANCZOS)
-    l = (bg.width - size) // 2
-    t = (bg.height - size) // 2
-    bg = bg.crop((l, t, l + size, t + size))
+    l = (bg.width - target_w) // 2
+    t = (bg.height - target_h) // 2
+    bg = bg.crop((l, t, l + target_w, t + target_h))
     if darken > 0:
-        bg = Image.blend(bg, Image.new("RGB", (size, size), (0, 0, 0)), darken)
+        bg = Image.blend(bg, Image.new("RGB", (target_w, target_h), (0, 0, 0)), darken)
     return bg
 
 
@@ -79,76 +87,55 @@ def add_star_particles(canvas, count=35, seed=4):
 
 # ─── Main asset ─────────────────────────────────────────────────
 def paste_main_asset(canvas, asset_path, target_w, radius, glow_color, glow_alpha):
-    """Fit the image in a safe zone — NEVER overlaps header, headline, or decorations.
-    
-    Safe zone layout (1080×1080 canvas):
-      ┌──────────────────────────┐
-      │ HEADER (0 - 160px)        │ ← socials + logo + corner brackets
-      ├──────────────────────────┤
-      │                            │
-      │   IMAGE ZONE              │ ← available: 160-660px (500px height)
-      │   (max 500px tall)        │
-      │                            │
-      ├──────────────────────────┤
-      │ HEADLINE (700-1000px)     │ ← 300px reserved for Arabic text
-      ├──────────────────────────┤
-      │ FOOTER decor (1000-1080)  │ ← corner brackets
-      └──────────────────────────┘
+    """Fit the image inside the safe zone, FULLY VISIBLE (no cropping).
+    For odd aspect ratios, adds black padding inside the rounded frame.
+    Returns (gx, gy, target_w, target_h) - the OUTER frame coords.
     """
     img = Image.open(asset_path).convert("RGB")
     W, H = canvas.size
 
-    # 🎯 SAFE ZONE BOUNDARIES - hard limits to prevent overlap
-    SAFE_TOP = 175      # Below header
-    SAFE_BOTTOM = 680   # Above headline area (leaves 400px for headline + footer)
-    SAFE_WIDTH = int(W * 0.82)  # ~885px wide (matches headline width)
+    # 🎯 SAFE ZONE BOUNDARIES - scale with canvas height
+    # For square (1080x1080):  top=175, bottom=680 → 505px
+    # For tall (1080x1920):    top=175, bottom=1520 → 1345px
+    # Layout: header 175px, image area (variable), headline 400px reserved
+    SAFE_TOP = 175
+    HEADLINE_RESERVED = 400  # space reserved at bottom for headline + decorations
+    SAFE_BOTTOM = H - HEADLINE_RESERVED
+    SAFE_WIDTH = int(W * 0.85)  # ~918px wide on 1080 canvas
 
-    available_h = SAFE_BOTTOM - SAFE_TOP  # 505px
+    available_h = SAFE_BOTTOM - SAFE_TOP
     available_w = SAFE_WIDTH
 
-    # Compute aspect ratio
+    # ===== FRAME size: use full available area (always) =====
+    # This makes the frame consistent regardless of image aspect ratio
+    target_w = available_w
+    target_h = available_h
+
+    # ===== IMAGE size inside frame: FIT (no crop) =====
     img_w, img_h = img.size
     aspect = img_w / img_h
+    frame_aspect = target_w / target_h
 
-    # Fit within safe zone (whichever dimension fills first)
-    # For tall images (portrait), height limits first
-    # For wide images (landscape), width limits first
-    if aspect >= 1.0:
-        # Landscape or square: try width first
-        fit_w = available_w
+    if aspect > frame_aspect:
+        # Image is wider than frame → fit by width, pad top/bottom
+        fit_w = target_w
         fit_h = int(fit_w / aspect)
-        if fit_h > available_h:
-            fit_h = available_h
-            fit_w = int(fit_h * aspect)
     else:
-        # Portrait: prefer height-fitting
-        fit_h = available_h
+        # Image is taller than frame → fit by height, pad left/right
+        fit_h = target_h
         fit_w = int(fit_h * aspect)
-        if fit_w > available_w:
-            fit_w = available_w
-            fit_h = int(fit_w / aspect)
 
-    # Resize using high-quality LANCZOS
     img = img.resize((fit_w, fit_h), Image.LANCZOS)
-    target_w, target_h = fit_w, fit_h
 
     # Center horizontally
     gx = (W - target_w) // 2
-    # Center vertically WITHIN the safe zone
-    gy = SAFE_TOP + (available_h - target_h) // 2
+    gy = SAFE_TOP
 
-    # Safety clamp - should already be in safe zone but just in case
-    if gy < SAFE_TOP:
-        gy = SAFE_TOP
-    if gy + target_h > SAFE_BOTTOM:
-        gy = SAFE_BOTTOM - target_h
-
-    # 🎨 Enhanced glow effect with multi-layer blur
+    # 🎨 Enhanced glow effect
     glow_size = 50
     glow = Image.new("RGBA",
                      (target_w + glow_size * 2, target_h + glow_size * 2),
                      (0, 0, 0, 0))
-    # Inner stronger glow
     ImageDraw.Draw(glow).rounded_rectangle(
         (glow_size, glow_size, glow_size + target_w, glow_size + target_h),
         radius=radius + 8, fill=(*hex_to_rgb(glow_color), min(glow_alpha + 30, 255))
@@ -156,22 +143,37 @@ def paste_main_asset(canvas, asset_path, target_w, radius, glow_color, glow_alph
     glow = glow.filter(ImageFilter.GaussianBlur(25))
     canvas.paste(glow, (gx - glow_size, gy - glow_size), glow)
 
-    # Rounded mask for image
-    mask = Image.new("L", (target_w, target_h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, target_w, target_h), radius=radius, fill=255)
-    canvas.paste(img, (gx, gy), mask)
+    # 🎨 Draw black background frame (so padded areas show black not bg)
+    frame_bg = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 255))
+    mask_outer = Image.new("L", (target_w, target_h), 0)
+    ImageDraw.Draw(mask_outer).rounded_rectangle((0, 0, target_w, target_h), radius=radius, fill=255)
+    canvas.paste(frame_bg, (gx, gy), mask_outer)
 
-    # 🎨 Enhanced border - double outline for depth
+    # Paste image CENTERED within the frame (with padding)
+    img_x = gx + (target_w - fit_w) // 2
+    img_y = gy + (target_h - fit_h) // 2
+
+    # Apply rounded mask to the image area only (so corners stay rounded)
+    # Use the outer mask for the full frame look
+    canvas.paste(img, (img_x, img_y))
+
+    # Re-apply rounded mask to final composite area to keep corners clean
+    # by drawing a "punch-out" - actually just re-paste with mask
+    composite = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+    composite_frame = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 255))
+    composite.paste(composite_frame, (0, 0))
+    composite.paste(img, ((target_w - fit_w) // 2, (target_h - fit_h) // 2))
+    canvas.paste(composite, (gx, gy), mask_outer)
+
+    # 🎨 Border outline
     draw = ImageDraw.Draw(canvas)
-    # Outer subtle border
     draw.rounded_rectangle(
         (gx - 3, gy - 3, gx + target_w + 3, gy + target_h + 3),
-        radius=radius + 3, outline=(255, 255, 255, 80), width=2
+        radius=radius + 3, outline=(255, 255, 255, 100), width=2
     )
-    # Inner highlight
     draw.rounded_rectangle(
         (gx + 1, gy + 1, gx + target_w - 1, gy + target_h - 1),
-        radius=radius - 1, outline=(255, 255, 255, 40), width=1
+        radius=radius - 1, outline=(255, 255, 255, 50), width=1
     )
 
     return gx, gy, target_w, target_h
@@ -481,7 +483,7 @@ def draw_decorative_line(canvas, y, color):
 
 # ─── MAIN ENTRY POINT ───────────────────────────────────────────
 def generate_post(config: dict, output_path: str, seed: int = None,
-                  return_box: bool = False) -> str:
+                  return_box: bool = False, canvas_height: int = None) -> str:
     """
     Generate a 4Ever post from config dict.
 
@@ -496,8 +498,9 @@ def generate_post(config: dict, output_path: str, seed: int = None,
         Path to the generated PNG, or (path, box_coords) tuple if return_box=True.
     """
     size = config["output"]["size"]
+    actual_h = canvas_height or size  # Default square, but can be taller
     bg_path = ROOT / config["background"]["file"]
-    canvas = prepare_background(bg_path, size, config["background"]["darken_amount"])
+    canvas = prepare_background(bg_path, size, config["background"]["darken_amount"], height=actual_h)
     canvas = add_star_particles(canvas, seed=seed or 4)
 
     asset_path = config["main_asset"]["file"]
@@ -551,10 +554,11 @@ def generate_post_layers(config: dict, bg_path: str, overlay_path: str, seed: in
     [bg_layer] → [video centered at gx,gy] → [overlay_layer] = final reel
     """
     size = config["output"]["size"]
+    canvas_height = config.get("canvas_height") or size
 
     # ===== LAYER 1: Background (everything that goes BEHIND the main image) =====
     bg_canvas_path = ROOT / config["background"]["file"]
-    bg_canvas = prepare_background(bg_canvas_path, size, config["background"]["darken_amount"])
+    bg_canvas = prepare_background(bg_canvas_path, size, config["background"]["darken_amount"], height=canvas_height)
     bg_canvas = add_star_particles(bg_canvas, seed=seed or 4)
 
     # Add header elements (logo, social icons) - these go BEHIND content
@@ -586,7 +590,7 @@ def generate_post_layers(config: dict, bg_path: str, overlay_path: str, seed: in
     except: pass
 
     # ===== LAYER 2: Overlay (everything that goes ON TOP of the main image) =====
-    overlay = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    overlay = Image.new("RGBA", (size, canvas_height), (0, 0, 0, 0))
 
     # Draw source logo (top-left of image)
     draw_source_logo(overlay, gx, gy, config["source_logo"]["type"])

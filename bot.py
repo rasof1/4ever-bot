@@ -144,7 +144,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 2.6 (ريلز كامل + كابشن حماسي)"
+        "• الإصدار: 2.7 (كانفس ديناميكي + fit للوسائط)"
     )
     await update.message.reply_text(msg)
 
@@ -209,31 +209,34 @@ def parse_count(text):
     return 1
 
 
-async def composite_video_into_design(bg_png, overlay_png, design_box, video_path, output_mp4):
+async def composite_video_into_design(bg_png, overlay_png, design_box, video_path, output_mp4,
+                                       canvas_w=1080, canvas_h=1080):
     """
     Composite a video INTO the 4Ever design with 3 layers:
     
-    Layer 1 (bottom): bg_png    - cosmic background + header logos
-    Layer 2 (middle): video     - user video scaled to fit design_box
+    Layer 1 (bottom): bg_png    - cosmic background + header logos (canvas_w x canvas_h)
+    Layer 2 (middle): video     - user video SCALED TO FIT (no crop) inside design_box
     Layer 3 (top):    overlay   - source logo, trend arrow, badges, headline (RGBA)
     
-    Result: 1080x1080 MP4 reel with FULL 4Ever branding on top of the video.
+    Result: MP4 reel at canvas_w x canvas_h with FULL 4Ever branding on top.
+    The video is FIT (preserving aspect) inside the design box - no cropping!
     """
     import subprocess
     import imageio_ffmpeg
 
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
     gx, gy, w, h = design_box
-    logger.info(f"🎬 3-layer composite at ({gx},{gy}) size {w}x{h}")
+    logger.info(f"🎬 3-layer composite: canvas {canvas_w}x{canvas_h}, box ({gx},{gy}) {w}x{h}")
 
     # Filter:
     # [0]=bg.png (looped), [1]=video, [2]=overlay.png (looped)
-    # - Scale video to fill box
+    # - Scale video to FIT inside box (preserve aspect, may add padding)
+    #   force_original_aspect_ratio=decrease + pad to fill the box with black bars
     # - Overlay video on bg at (gx, gy)
     # - Then overlay the badges/source/headline RGBA on top
     filter_complex = (
-        f"[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
-        f"crop={w}:{h}[vid];"
+        f"[1:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black[vid];"
         f"[0:v][vid]overlay={gx}:{gy}[bg_with_vid];"
         f"[bg_with_vid][2:v]overlay=0:0:shortest=1[out]"
     )
@@ -295,7 +298,19 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
 
     # 🎬 VIDEO MODE: build a video reel with 4Ever frame
     if video_path and os.path.exists(video_path):
-        await progress.edit_text("🎨 جاري تصميم طبقات المنشور...")
+        await progress.edit_text("🔍 جاري تحليل الفيديو...")
+
+        # 🎯 Detect video dimensions to choose canvas size
+        vid_w, vid_h = get_video_dimensions(video_path)
+        canvas_w, canvas_h = choose_canvas_size_for_aspect(vid_w, vid_h)
+
+        # Inject canvas_height into config
+        cfg["canvas_height"] = canvas_h
+
+        await progress.edit_text(
+            f"🎨 جاري تصميم طبقات المنشور...\n"
+            f"📐 الكانفس: {canvas_w}x{canvas_h}"
+        )
 
         # Generate two layers: background and overlay (badges/source/headline)
         bg_layer = str(OUTPUT_DIR / f"bg_{os.getpid()}_{id(news)}.png")
@@ -307,19 +322,21 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
 
         # Also generate fallback static image (in case ffmpeg fails)
         def _gen_static():
-            return generate_post(cfg, out_path)
+            return generate_post(cfg, out_path, canvas_height=canvas_h)
         await loop.run_in_executor(None, _gen_static)
 
         await progress.edit_text(
             "🎬 جاري دمج الفيديو في تصميم 4Ever الكامل...\n"
             "🏷️ يتضمن: شعار المصدر + سهم الترند + البادجات\n"
-            "⏳ سيستغرق 2-4 دقائق..."
+            f"📐 {canvas_w}x{canvas_h}\n"
+            "⏳ سيستغرق 3-5 دقائق..."
         )
 
-        # Composite: bg → video → overlay (3 layers)
+        # Composite: bg → video → overlay (3 layers) at chosen canvas size
         video_out = str(OUTPUT_DIR / f"reel_{os.getpid()}_{id(news)}.mp4")
         success = await composite_video_into_design(
-            bg_layer, overlay_layer, box_coords, video_path, video_out
+            bg_layer, overlay_layer, box_coords, video_path, video_out,
+            canvas_w=canvas_w, canvas_h=canvas_h
         )
 
         # Cleanup intermediate layers
@@ -337,13 +354,13 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
                             video=f,
                             caption=caption,
                             supports_streaming=True,
-                            width=1080, height=1080,
+                            width=canvas_w, height=canvas_h,
                         )
                     else:
                         await message.reply_video(
                             video=f,
                             supports_streaming=True,
-                            width=1080, height=1080,
+                            width=canvas_w, height=canvas_h,
                         )
                         for chunk_start in range(0, len(caption), 4000):
                             await message.reply_text(caption[chunk_start:chunk_start + 4000])
@@ -380,9 +397,18 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
             except Exception:
                 pass
     else:
-        # 📸 IMAGE-ONLY MODE: standard static post
-        await progress.edit_text("🎨 جاري تصميم المنشور...")
-        await loop.run_in_executor(None, generate_post, cfg, out_path)
+        # 📸 IMAGE-ONLY MODE: detect aspect, choose canvas, design
+        img_w, img_h = get_image_dimensions(img_path)
+        canvas_w, canvas_h = choose_canvas_size_for_aspect(img_w, img_h)
+
+        await progress.edit_text(
+            f"🎨 جاري تصميم المنشور...\n"
+            f"📐 الكانفس: {canvas_w}x{canvas_h}"
+        )
+
+        def _gen():
+            return generate_post(cfg, out_path, canvas_height=canvas_h)
+        await loop.run_in_executor(None, _gen)
 
         if len(caption) <= 1024:
             with open(out_path, "rb") as f:
@@ -933,6 +959,58 @@ async def handle_video(update, ctx):
     await ask_about_language(update.message, ctx, "photo_caption", {"caption": caption})
 
 
+def get_video_dimensions(video_path):
+    """Get video width, height, and duration using ffmpeg."""
+    import subprocess
+    import imageio_ffmpeg
+    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    try:
+        # Use ffmpeg to probe (no ffprobe needed)
+        result = subprocess.run(
+            [ffmpeg_bin, "-i", video_path],
+            capture_output=True, text=False, timeout=10
+        )
+        stderr = result.stderr.decode('utf-8', errors='ignore')
+        # Parse "Stream ... Video: ... 1080x1920 ..."
+        import re
+        m = re.search(r'(\d+)x(\d+)', stderr)
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            logger.info(f"   Video dimensions: {w}x{h}")
+            return w, h
+    except Exception as e:
+        logger.warning(f"   Could not probe video: {e}")
+    return None, None
+
+
+def choose_canvas_size_for_aspect(media_w, media_h):
+    """Choose canvas size (W, H) based on media aspect ratio.
+    - Wide/square (>= 0.85): 1080x1080 (square IG post)
+    - Tall (< 0.85): 1080x1920 (vertical reels)
+    """
+    if not media_w or not media_h:
+        return 1080, 1080  # default square
+    aspect = media_w / media_h
+    if aspect < 0.85:
+        # Portrait video → vertical canvas
+        logger.info(f"   📐 Tall aspect ({aspect:.2f}) → 1080x1920 canvas")
+        return 1080, 1920
+    else:
+        # Landscape or square → square canvas
+        logger.info(f"   📐 Wide aspect ({aspect:.2f}) → 1080x1080 canvas")
+        return 1080, 1080
+
+
+def get_image_dimensions(img_path):
+    """Get image dimensions using PIL."""
+    try:
+        from PIL import Image
+        with Image.open(img_path) as img:
+            return img.size
+    except Exception:
+        return None, None
+
+
 async def extract_video_frame(video_path, frame_path):
     """Extract a representative frame from a video.
     Uses imageio-ffmpeg (Python package that ships a static ffmpeg binary).
@@ -1018,7 +1096,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v2.6 (full-branding-reels)...")
+    logger.info("🤖 Starting 4Ever Bot v2.7 (dynamic-canvas-fit)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
