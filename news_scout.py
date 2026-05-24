@@ -27,6 +27,38 @@ if _env_model:
     FALLBACK_MODELS = [_env_model] + [m for m in FALLBACK_MODELS if m != _env_model]
 
 # Language config
+DIALECTS = {
+    "fusha": {
+        "label": "العربية الفصحى",
+        "instruction": "اكتب بالعربية الفصحى المعاصرة، احترافية وواضحة وخالية من أي لهجة.",
+    },
+    "egyptian": {
+        "label": "🇪🇬 المصرية",
+        "instruction": "اكتب باللهجة المصرية العامية الحديثة (لهجة القاهرة) - استخدم كلمات مثل: ازاي، بس، علشان، يلا، كده، هتلاقي، إيه، ده، فين، لسه، خالص. مثال: 'تخيل كده يا معلم، ده هيغير اللعبة خالص!' كن حماسياً ومحبوباً.",
+    },
+    "levantine": {
+        "label": "🇸🇾 الشامية",
+        "instruction": "اكتب باللهجة الشامية (سورية/لبنانية/فلسطينية/أردنية) - استخدم: شو، هيك، كتير، منيح، يعني، هلق، ليش، بدك، شغلة، عنجد، طلع. مثال: 'شو يعني هيدي الميزة؟ كتير منيحة عنجد!' كن دافئاً ومتحمساً.",
+    },
+    "saudi": {
+        "label": "🇸🇦 السعودية",
+        "instruction": "اكتب باللهجة السعودية النجدية - استخدم: ايش، كذا، ذي، تقدر، عقب، يبيله، حلو، يعطيك العافية، بزر، طوفنا. مثال: 'ايش رايكم في ذي الميزة؟ صراحة قمة!' كن جريئاً ومباشراً.",
+    },
+    "algerian": {
+        "label": "🇩🇿 الجزائرية",
+        "instruction": "اكتب باللهجة الجزائرية - استخدم: واش، بصح، كيما، نتاع، راني، بزاف، كيف، تاع، ماشي، يخي. ملاحظة: استخدم حروف عربية فقط. مثال: 'واش رايكم؟ هاد الحاجة راها بزاف مليحة!' كن صريحاً وحماسياً.",
+    },
+    "emirati": {
+        "label": "🇦🇪 الإماراتية",
+        "instruction": "اكتب باللهجة الإماراتية الخليجية - استخدم: شو، وايد، عاد، يهال، شوي، الحين، يبا، خلاص، طاير، فديت. مثال: 'شو رايكم يهال؟ هالميزة وايد عودة!' كن أنيقاً وعصرياً.",
+    },
+    "moroccan": {
+        "label": "🇲🇦 المغربية",
+        "instruction": "اكتب باللهجة المغربية - استخدم: واخا، بزاف، دابا، شنو، فين، علاش، كيداير، شوي، زوين، نتا. مثال: 'شنو رايكم؟ هاد الحاجة زوينة بزاف!' كن ودوداً ومحبوباً.",
+    },
+}
+
+
 LANG_INSTRUCTIONS = {
     "ar": {
         "name_ar": "العربية",
@@ -463,14 +495,24 @@ def _finalize_result(result):
     return result
 
 
-def scout_news(extra_instructions="", lang="ar"):
-    """Scout latest tech news. lang: 'ar' (Arabic), 'en' (English), 'fr' (French)."""
+def scout_news(extra_instructions="", lang="ar", dialect=None):
+    """Scout latest tech news.
+    lang: 'ar' | 'en' | 'fr'
+    dialect (for ar only): 'fusha' | 'egyptian' | 'levantine' | 'saudi' | 'algerian' | 'emirati' | 'moroccan' | None
+    """
     lang_cfg = LANG_INSTRUCTIONS.get(lang, LANG_INSTRUCTIONS["ar"])
     lang_block = f"\n\n🌐 لغة المنشور: {lang_cfg['caption_lang']}\n{lang_cfg['instruction']}\nأمثلة هاشتاقات بهذه اللغة: {lang_cfg['hashtag_examples']}\n"
+
+    # Add dialect instruction for Arabic
+    if lang == "ar" and dialect and dialect in DIALECTS:
+        dialect_cfg = DIALECTS[dialect]
+        lang_block += f"\n🗣️ اللهجة المطلوبة: {dialect_cfg['label']}\n{dialect_cfg['instruction']}\nملاحظة مهمة: العنوان (headline_line1, headline_line2_ar) يبقى بالفصحى، لكن الكابشن (caption) كاملاً باللهجة المطلوبة.\n"
+
     full_extras = lang_block + (extra_instructions or "")
     prompt = PROMPT_TEMPLATE.format(extra_instructions=full_extras)
     result = _call_gemini(prompt)
-    result["_lang"] = lang  # Store for downstream use
+    result["_lang"] = lang
+    result["_dialect"] = dialect
     return _finalize_result(result)
 
 
@@ -568,16 +610,22 @@ REVERSE_PROMPT = r"""أنت محرر تقني محترف لصفحة عربية "
 """
 
 
-def reverse_scout(user_content, lang="ar"):
-    """Convert user-provided content to 4Ever post in specified language."""
+def reverse_scout(user_content, lang="ar", dialect=None):
+    """Convert user-provided content to 4Ever post in specified language/dialect."""
     lang_cfg = LANG_INSTRUCTIONS.get(lang, LANG_INSTRUCTIONS["ar"])
     lang_block = f"\n\n🌐 اللغة المطلوبة للمنشور: {lang_cfg['caption_lang']}\n{lang_cfg['instruction']}\nأمثلة وسوم بهذه اللغة: {lang_cfg['hashtag_examples']}\n"
+
+    if lang == "ar" and dialect and dialect in DIALECTS:
+        dialect_cfg = DIALECTS[dialect]
+        lang_block += f"\n🗣️ اللهجة المطلوبة: {dialect_cfg['label']}\n{dialect_cfg['instruction']}\nملاحظة: العنوان بالفصحى، الكابشن باللهجة.\n"
+
     full_content = user_content[:8000] + lang_block
     prompt = REVERSE_PROMPT.format(user_content=full_content)
     result = _call_gemini(prompt, body_overrides={
         "generationConfig": {"temperature": 0.7}
     })
     result["_lang"] = lang
+    result["_dialect"] = dialect
     return _finalize_result(result)
 
 
@@ -771,24 +819,25 @@ def validate_post_with_ai(news_data, image_path):
         return (True, [], str(e))
 
 
-def acquire_validated_image(news_data, save_path, max_attempts=5):
+def acquire_validated_image(news_data, save_path, max_attempts=7):
     """
-    Smart image acquisition - prefer REAL search results over AI generation.
-    Validates with AI vision (90%+ match required).
+    SEARCH-FIRST image acquisition - prefer REAL photos over AI generation.
 
-    Strategy:
-    1-2: search with original query (Bing → DuckDuckGo)
-    3:   search with broader query (drop adjectives)
-    4:   AI generation with detailed prompt
-    5:   AI generation with category hints
-
-    Last successful image kept even if validator complains (prevent dead-end).
+    Strategy (7 attempts):
+    1: Original specific query → Bing/DDG/Google/Unsplash
+    2: Broader query (product + 'photo')
+    3: Company + product + 'announcement'
+    4: Headline_ar translated keywords
+    5: Just the company name + category
+    6: AI gen with image_prompt (only if all searches failed)
+    7: AI gen with category hints (last resort)
     """
     original_query = news_data.get("image_query", "")
     headline_en = news_data.get("headline_line2_en", "")
+    headline_ar = news_data.get("headline_line1", "")
     source = news_data.get("source", "")
+    category = news_data.get("category", "ai")
 
-    best_save_path = save_path
     has_any_image = False
 
     for attempt in range(max_attempts):
@@ -799,67 +848,166 @@ def acquire_validated_image(news_data, save_path, max_attempts=5):
             # Original specific query
             got = find_or_generate_image_search_only(news_data, save_path)
         elif attempt == 1:
-            # Try broader query (just product name + 'photo')
+            # Broader: product + photo
             if headline_en:
-                broader = {**news_data, "image_query": f"{headline_en} photo"}
+                broader = {**news_data, "image_query": f"{headline_en} photo official"}
                 got = find_or_generate_image_search_only(broader, save_path)
         elif attempt == 2:
-            # Try with company + product
+            # Company + product + announcement
             if source and headline_en:
                 broader = {**news_data, "image_query": f"{source} {headline_en} announcement"}
                 got = find_or_generate_image_search_only(broader, save_path)
         elif attempt == 3:
-            # AI generation - high quality
-            ai_prompt = news_data.get("image_prompt") or original_query or "tech product"
+            # Source + category
+            if source:
+                cat_keywords = {
+                    "phone": "smartphone",
+                    "gaming": "game console",
+                    "ai": "AI announcement",
+                    "hardware": "chip processor",
+                    "leak": "leak render",
+                    "emerging": "technology",
+                }
+                broader = {**news_data, "image_query": f"{source} {cat_keywords.get(category, 'technology')}"}
+                got = find_or_generate_image_search_only(broader, save_path)
+        elif attempt == 4:
+            # Just headline_en + 'new'
+            if headline_en:
+                broader = {**news_data, "image_query": f"new {headline_en}"}
+                got = find_or_generate_image_search_only(broader, save_path)
+        elif attempt == 5:
+            # AI generation - high quality (only after searches exhausted)
+            log.info(f"   🤖 Falling back to AI generation")
+            ai_prompt = news_data.get("image_prompt") or original_query or f"{source} tech product"
             got = generate_ai_image(ai_prompt, save_path)
         else:
             # Last: AI with category hints
-            cat = news_data.get("category", "ai")
+            log.info(f"   🤖 Last resort: AI with category")
             category_hints = {
-                "phone": "modern smartphone product render dark background dramatic",
+                "phone": "modern smartphone product render dark background dramatic lighting cinematic",
                 "gaming": "gaming console controller futuristic neon lighting",
-                "ai": "artificial intelligence robot futuristic abstract",
-                "hardware": "computer chip GPU close-up cinematic lighting",
-                "leak": "tech device leaked render mysterious",
-                "emerging": "futuristic technology concept neon",
+                "ai": "artificial intelligence robot futuristic abstract glowing",
+                "hardware": "computer chip GPU close-up cinematic lighting macro",
+                "leak": "tech device leaked render mysterious dark",
+                "emerging": "futuristic technology concept neon glowing",
             }
-            ai_prompt = f"{news_data.get('image_prompt', '')} {category_hints.get(cat, '')}"
+            ai_prompt = f"{news_data.get('image_prompt', '')} {category_hints.get(category, 'high quality professional tech product photo')}"
             got = generate_ai_image(ai_prompt, save_path)
 
         if not got:
             continue
 
-        # 🎯 Quick local check: reject mostly-empty/monochrome images BEFORE AI validation
+        # Quick local check: reject empty/monochrome images
         if not _is_image_visually_meaningful(save_path):
-            log.warning(f"   🚫 Image is visually empty/monochrome")
+            log.warning(f"   🚫 Image visually empty/monochrome - skip")
             continue
 
         has_any_image = True
 
-        # Validate with AI
-        is_valid, issues, reason = validate_post_with_ai(news_data, save_path)
-        if is_valid:
-            log.info(f"   ✅ Image accepted on attempt {attempt+1}")
+        # For AI-generated images (attempts 5-6), still validate
+        # For search results (attempts 0-4), the search itself plus visual check is usually enough
+        if attempt >= 5:
+            # AI-generated → validate with vision
+            is_valid, issues, reason = validate_post_with_ai(news_data, save_path)
+            if is_valid:
+                log.info(f"   ✅ AI image accepted on attempt {attempt+1}")
+                return True
+            log.warning(f"   AI image rejected: {reason}")
+        else:
+            # Search result that passed visual check → accept directly (trust the search)
+            log.info(f"   ✅ Real photo from search accepted on attempt {attempt+1}")
             return True
-
-        log.warning(f"   Image rejected by AI validator: {reason}")
 
     log.warning("   Using last attempted image despite validation issues")
     return has_any_image and os.path.exists(save_path)
 
 
+def search_images_via_google_images(query):
+    """Scrape Google Images for the query (last resort)."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        url = f"https://www.google.com/search?q={requests.utils.quote(query)}&tbm=isch&safe=active"
+        r = requests.get(url, headers=headers, timeout=12)
+        if r.status_code != 200:
+            return []
+        html = r.text
+        # Extract image URLs - Google uses various patterns
+        urls = []
+        # Pattern 1: "ou":"..." (older)
+        urls.extend(re.findall(r'"ou":"(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', html, re.IGNORECASE))
+        # Pattern 2: imgurl
+        urls.extend(re.findall(r'imgurl=(https?://[^&]+\.(?:jpg|jpeg|png|webp))', html, re.IGNORECASE))
+        # Pattern 3: src in img tags (last resort - thumbnails)
+        if not urls:
+            urls.extend(re.findall(r'<img[^>]+src="(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', html, re.IGNORECASE))
+        # Decode URL-encoded chars
+        from urllib.parse import unquote
+        urls = [unquote(u) for u in urls]
+        # Filter: skip Google's own assets
+        urls = [u for u in urls if 'gstatic.com' not in u and 'google.com' not in u]
+        return urls[:15]
+    except Exception as e:
+        log.warning(f"   Google Images failed: {e}")
+        return []
+
+
+def search_images_via_unsplash(query):
+    """Free Unsplash source (no key needed for source.unsplash.com)."""
+    try:
+        # Unsplash source endpoint returns a random matching image
+        url = f"https://source.unsplash.com/1280x720/?{requests.utils.quote(query)}"
+        # We don't fetch — we trust this URL works as image
+        return [url]
+    except Exception:
+        return []
+
+
 def find_or_generate_image_search_only(news_data, save_path):
-    """Search-only variant (no AI gen fallback inside)."""
+    """Search-only variant - tries Bing, DDG, Google Images, Unsplash."""
     query = news_data.get("image_query", "")
     if not query:
         return False
     log.info(f"🔍 Searching: {query}")
-    urls = search_images_via_bing(query)
-    if not urls:
-        urls = search_images_via_duckduckgo(query)
 
-    for i, url in enumerate(urls[:7]):  # Try more candidates
-        log.info(f"   🔗 Try {i+1}: {url[:80]}")
+    # Collect URLs from all sources
+    all_urls = []
+    bing_urls = search_images_via_bing(query)
+    log.info(f"   Bing: {len(bing_urls)} results")
+    all_urls.extend(bing_urls)
+
+    if len(all_urls) < 5:
+        ddg_urls = search_images_via_duckduckgo(query)
+        log.info(f"   DuckDuckGo: {len(ddg_urls)} results")
+        all_urls.extend(ddg_urls)
+
+    if len(all_urls) < 5:
+        google_urls = search_images_via_google_images(query)
+        log.info(f"   Google Images: {len(google_urls)} results")
+        all_urls.extend(google_urls)
+
+    if not all_urls:
+        log.info(f"   Trying Unsplash as last search source")
+        all_urls = search_images_via_unsplash(query)
+
+    # Dedupe while preserving order
+    seen = set()
+    unique_urls = []
+    for u in all_urls:
+        if u not in seen:
+            seen.add(u)
+            unique_urls.append(u)
+
+    # Try each URL
+    for i, url in enumerate(unique_urls[:12]):  # Try up to 12 candidates
+        log.info(f"   🔗 Try {i+1}/{min(12, len(unique_urls))}: {url[:80]}")
         if try_download_image(url, save_path):
-            return True
+            # Quick visual check
+            if _is_image_visually_meaningful(save_path):
+                log.info(f"   ✅ Got valid image from URL {i+1}")
+                return True
+            else:
+                log.info(f"   ⚠️ Image is empty/monochrome, trying next")
     return False

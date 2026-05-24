@@ -118,6 +118,13 @@ async def cmd_help(update, ctx):
         "  • لا → يبحث/يولّد تلقائياً\n\n"
         "🌐 *اللغات:*\n"
         "• `/lang ar` ← العربية افتراضي\n"
+        "• `/lang ar egyptian` ← عربي مصري\n"
+        "• `/lang ar levantine` ← شامي\n"
+        "• `/lang ar saudi` ← سعودي\n"
+        "• `/lang ar algerian` ← جزائري\n"
+        "• `/lang ar emirati` ← إماراتي\n"
+        "• `/lang ar moroccan` ← مغربي\n"
+        "• `/lang ar fusha` ← فصحى فقط\n"
         "• `/lang en` ← English افتراضي\n"
         "• `/lang fr` ← Français افتراضي\n"
         "• `/lang off` ← اسأل كل مرة\n\n"
@@ -144,7 +151,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 2.7 (كانفس ديناميكي + fit للوسائط)"
+        "• الإصدار: 2.8 (لهجات + صور حقيقية أولاً + كانفس مرن)"
     )
     await update.message.reply_text(msg)
 
@@ -163,7 +170,7 @@ async def cmd_lang(update, ctx):
     Usage: /lang ar | /lang en | /lang fr | /lang off"""
     user_id = update.effective_user.id
     text = (update.message.text or "").strip().lower()
-    parts = text.split(maxsplit=1)
+    parts = text.split(maxsplit=2)
 
     if len(parts) < 2:
         current = USER_PREFS.get(user_id, {}).get("default_lang", "off")
@@ -179,15 +186,34 @@ async def cmd_lang(update, ctx):
         return
 
     choice = parts[1]
+    # Support: /lang ar egyptian, /lang ar fusha, etc.
+    sub_choice = parts[2] if len(parts) > 2 else None
+
     if choice in ("ar", "en", "fr"):
         USER_PREFS.setdefault(user_id, {})["default_lang"] = choice
         labels = {"ar": "🇸🇦 العربية", "en": "🇬🇧 English", "fr": "🇫🇷 Français"}
-        await update.message.reply_text(
-            f"✅ تم تعيين {labels[choice]} كلغة افتراضية\n"
-            f"لن أسألك عن اللغة بعد الآن.\n"
-            f"لإلغاء: `/lang off`",
-            parse_mode="Markdown"
-        )
+
+        # For Arabic: allow sub-choice for dialect
+        if choice == "ar" and sub_choice and sub_choice in DIALECTS:
+            USER_PREFS[user_id]["default_dialect"] = sub_choice
+            dialect_label = DIALECTS[sub_choice]["label"]
+            await update.message.reply_text(
+                f"✅ تم تعيين {labels[choice]} ({dialect_label}) كافتراضي\n"
+                f"لن أسألك عن اللغة ولا اللهجة.\n"
+                f"لإلغاء: `/lang off`",
+                parse_mode="Markdown"
+            )
+        else:
+            # Remove dialect preference if switching to non-ar or without sub-choice
+            USER_PREFS[user_id].pop("default_dialect", None)
+            extra = ""
+            if choice == "ar":
+                extra = "\n💡 لإضافة لهجة: `/lang ar egyptian` (أو: levantine, saudi, algerian, emirati, moroccan, fusha)"
+            await update.message.reply_text(
+                f"✅ تم تعيين {labels[choice]} كلغة افتراضية{extra}\n"
+                f"لإلغاء: `/lang off`",
+                parse_mode="Markdown"
+            )
     elif choice == "off":
         if user_id in USER_PREFS:
             USER_PREFS[user_id].pop("default_lang", None)
@@ -498,26 +524,29 @@ async def ask_about_language(message, ctx, callback_kind, payload):
     user_id = message.from_user.id
 
     # Check for saved default language
-    default_lang = USER_PREFS.get(user_id, {}).get("default_lang")
+    prefs = USER_PREFS.get(user_id, {})
+    default_lang = prefs.get("default_lang")
+    default_dialect = prefs.get("default_dialect")  # only for ar
     if default_lang:
         # Skip picker, go straight to execution
-        logger.info(f"   Using saved default lang: {default_lang}")
+        dialect_note = f" + {DIALECTS.get(default_dialect, {}).get('label', '')}" if (default_lang == "ar" and default_dialect) else ""
+        logger.info(f"   Using saved default lang: {default_lang}{dialect_note}")
         progress = await message.reply_text(
-            f"🚀 جاري التنفيذ باللغة المحفوظة: {default_lang.upper()}..."
+            f"🚀 جاري التنفيذ باللغة المحفوظة: {default_lang.upper()}{dialect_note}..."
         )
         try:
             if callback_kind == "auto":
                 count = payload.get("count", 1)
                 for i in range(1, count + 1):
-                    await generate_and_send_one_with_lang(progress, user_id, i, count, default_lang, ctx)
+                    await generate_and_send_one_with_lang(progress, user_id, i, count, default_lang, ctx, dialect=default_dialect)
                 if count > 1:
                     await message.reply_text(f"✅ تم توليد {count} منشورات!")
             elif callback_kind == "url":
-                await execute_reverse_url(progress, user_id, payload["url"], payload["full_text"], default_lang, ctx)
+                await execute_reverse_url(progress, user_id, payload["url"], payload["full_text"], default_lang, ctx, dialect=default_dialect)
             elif callback_kind == "text":
-                await execute_reverse_text(progress, user_id, payload["text"], default_lang, ctx)
+                await execute_reverse_text(progress, user_id, payload["text"], default_lang, ctx, dialect=default_dialect)
             elif callback_kind == "photo_caption":
-                await execute_reverse_photo_caption(progress, user_id, payload["caption"], default_lang, ctx)
+                await execute_reverse_photo_caption(progress, user_id, payload["caption"], default_lang, ctx, dialect=default_dialect)
         except Exception as e:
             logger.error(f"Direct lang dispatch failed: {e}\n{traceback.format_exc()}")
             await message.reply_text(f"❌ فشل: {str(e)[:200]}")
@@ -548,8 +577,100 @@ async def ask_about_language(message, ctx, callback_kind, payload):
     return await message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
 
 
+async def ask_about_dialect(query, user_id, callback_kind, payload, chat_id, ctx):
+    """After user picks Arabic, ask which dialect (or Fusha)."""
+    keyboard = [
+        [
+            InlineKeyboardButton("📚 الفصحى", callback_data=f"dial_fusha_{user_id}"),
+            InlineKeyboardButton("🇪🇬 المصرية", callback_data=f"dial_egyptian_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("🇸🇾 الشامية", callback_data=f"dial_levantine_{user_id}"),
+            InlineKeyboardButton("🇸🇦 السعودية", callback_data=f"dial_saudi_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("🇩🇿 الجزائرية", callback_data=f"dial_algerian_{user_id}"),
+            InlineKeyboardButton("🇦🇪 الإماراتية", callback_data=f"dial_emirati_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("🇲🇦 المغربية", callback_data=f"dial_moroccan_{user_id}"),
+        ],
+    ]
+    PENDING_NEWS[user_id] = {
+        "kind": "dial_choice",
+        "callback_kind": callback_kind,
+        "payload": payload,
+        "chat_id": chat_id,
+        "user_id": user_id,
+    }
+    await query.edit_message_text(
+        "🗣️ *اختر اللهجة:*\n\n"
+        "📚 *الفصحى* - عربية معاصرة احترافية\n"
+        "🇪🇬 *المصرية* - ازاي، علشان، يلا، كده\n"
+        "🇸🇾 *الشامية* - شو، هيك، كتير، منيح\n"
+        "🇸🇦 *السعودية* - ايش، كذا، حلو\n"
+        "🇩🇿 *الجزائرية* - واش، بصح، كيما\n"
+        "🇦🇪 *الإماراتية* - شو، وايد، عاد\n"
+        "🇲🇦 *المغربية* - واخا، بزاف، دابا\n\n"
+        "_ملاحظة: العنوان يبقى بالفصحى، الكابشن باللهجة المختارة_",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+
+async def handle_dialect_choice(update, ctx):
+    """Callback when user selects an Arabic dialect."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    if len(parts) < 3:
+        return
+    dialect = parts[1]
+    try:
+        user_id = int(parts[2])
+    except ValueError:
+        return
+
+    if query.from_user.id != user_id:
+        await query.answer("⚠️ هذا الزر لمستخدم آخر", show_alert=True)
+        return
+
+    pending = PENDING_NEWS.get(user_id)
+    if not pending or pending.get("kind") != "dial_choice":
+        await query.edit_message_text("⚠️ انتهت المهلة. حاول مرة أخرى.")
+        return
+
+    callback_kind = pending["callback_kind"]
+    payload = pending["payload"]
+    chat_id = pending.get("chat_id")
+    PENDING_NEWS.pop(user_id, None)
+
+    dialect_label = DIALECTS.get(dialect, {}).get("label", dialect)
+    progress = await ctx.bot.send_message(chat_id, f"✅ {dialect_label}\n🚀 جاري التنفيذ...")
+
+    try:
+        if callback_kind == "auto":
+            count = payload.get("count", 1)
+            for i in range(1, count + 1):
+                await generate_and_send_one_with_lang(progress, user_id, i, count, "ar", ctx, dialect=dialect)
+            if count > 1:
+                await ctx.bot.send_message(chat_id, f"✅ تم توليد {count} منشورات!")
+        elif callback_kind == "url":
+            await execute_reverse_url(progress, user_id, payload["url"], payload["full_text"], "ar", ctx, dialect=dialect)
+        elif callback_kind == "text":
+            await execute_reverse_text(progress, user_id, payload["text"], "ar", ctx, dialect=dialect)
+        elif callback_kind == "photo_caption":
+            await execute_reverse_photo_caption(progress, user_id, payload["caption"], "ar", ctx, dialect=dialect)
+    except Exception as e:
+        logger.error(f"Dialect dispatch failed: {e}\n{traceback.format_exc()}")
+        await ctx.bot.send_message(chat_id, f"❌ فشل: {str(e)[:200]}")
+
+
 async def handle_language_choice(update, ctx):
-    """Callback when user selects a language."""
+    """Callback when user selects a language.
+    For Arabic, this routes to dialect picker first.
+    """
     query = update.callback_query
     await query.answer()
 
@@ -574,6 +695,12 @@ async def handle_language_choice(update, ctx):
     callback_kind = pending["callback_kind"]
     payload = pending["payload"]
     chat_id = pending.get("chat_id")
+
+    # 🆕 If Arabic, ask for dialect first
+    if lang == "ar":
+        await ask_about_dialect(query, user_id, callback_kind, payload, chat_id, ctx)
+        return
+
     PENDING_NEWS.pop(user_id, None)
 
     lang_label = {"ar": "🇸🇦 العربية", "en": "🇬🇧 English", "fr": "🇫🇷 Français"}[lang]
@@ -960,24 +1087,36 @@ async def handle_video(update, ctx):
 
 
 def get_video_dimensions(video_path):
-    """Get video width, height, and duration using ffmpeg."""
+    """Get video width, height using ffmpeg.
+    Uses strict regex that only matches Video stream lines (avoiding codec tags like 0x31637661).
+    """
     import subprocess
     import imageio_ffmpeg
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
     try:
-        # Use ffmpeg to probe (no ffprobe needed)
         result = subprocess.run(
             [ffmpeg_bin, "-i", video_path],
             capture_output=True, text=False, timeout=10
         )
         stderr = result.stderr.decode('utf-8', errors='ignore')
-        # Parse "Stream ... Video: ... 1080x1920 ..."
+
+        # Look ONLY at lines that contain "Video:" stream info
         import re
-        m = re.search(r'(\d+)x(\d+)', stderr)
-        if m:
-            w, h = int(m.group(1)), int(m.group(2))
-            logger.info(f"   Video dimensions: {w}x{h}")
-            return w, h
+        for line in stderr.split('\n'):
+            if 'Video:' not in line:
+                continue
+            # Match WIDTHxHEIGHT but NOT hex codes (0x...)
+            # The dimensions appear as " 1080x1920 " or " 1080x1920," or " 1080x1920 [SAR..."
+            matches = re.findall(r'(?<![x\w])(\d{2,5})x(\d{2,5})(?![\w])', line)
+            for w_str, h_str in matches:
+                w, h = int(w_str), int(h_str)
+                # Sanity: real video dims are 100-7680 typically
+                if 100 <= w <= 7680 and 100 <= h <= 7680:
+                    logger.info(f"   ✅ Video dimensions: {w}x{h}")
+                    return w, h
+        logger.warning(f"   Could not parse dimensions from ffmpeg output")
+        # Log first 500 chars of stderr for debugging
+        logger.warning(f"   ffmpeg stderr preview: {stderr[:500]}")
     except Exception as e:
         logger.warning(f"   Could not probe video: {e}")
     return None, None
@@ -1096,7 +1235,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v2.7 (dynamic-canvas-fit)...")
+    logger.info("🤖 Starting 4Ever Bot v2.8 (dialects+search-first-images+fixed-aspect)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1109,6 +1248,7 @@ def main():
     # Callback query handlers for inline buttons
     app.add_handler(CallbackQueryHandler(handle_image_choice, pattern=r"^img_(yes|no)_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_language_choice, pattern=r"^lang_(ar|en|fr)_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_dialect_choice, pattern=r"^dial_(fusha|egyptian|levantine|saudi|algerian|emirati|moroccan)_\d+$"))
 
     # 🆕 Videos & animations (GIF) → handle_video
     app.add_handler(MessageHandler(
