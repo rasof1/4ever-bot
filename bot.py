@@ -14,7 +14,7 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes
 )
 
-from post_generator import generate_post
+from post_generator import generate_post, generate_post_layers
 from news_scout import (
     scout_news, download_image, reverse_scout, fetch_url_content,
     acquire_validated_image, LANG_INSTRUCTIONS,
@@ -39,6 +39,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # In-memory state: user_id → {"news": ..., "awaiting_image": bool}
 PENDING_NEWS = {}
+USER_PREFS = {}  # user_id -> {"default_lang": "ar|en|fr"}
 
 
 def sanitize_badge(text):
@@ -102,20 +103,34 @@ async def cmd_start(update, ctx):
 
 async def cmd_help(update, ctx):
     msg = (
-        "📖 الأوامر:\n\n"
-        "🎯 توليد تلقائي:\n"
-        "• منشور / /post ← منشور واحد\n"
-        f"• منشور N ← N منشورات (1-{MAX_POSTS})\n\n"
-        "🔄 الوضع العكسي:\n"
-        "• أرسل رابط خبر\n"
-        "• أرسل وصف خبر (>20 حرف)\n"
-        "• أرسل صورة + كابشن\n"
-        "→ يسألك: 📸 عندك صورة؟\n"
-        "  • نعم → ارفع صورتك\n"
+        "📖 *دليل أوامر 4Ever* 📖\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🎯 *توليد تلقائي:*\n"
+        "• `منشور` / `/post` ← منشور واحد\n"
+        f"• `منشور N` ← N منشورات (1-{MAX_POSTS})\n\n"
+        "🔄 *الوضع العكسي:*\n"
+        "• أرسل رابط خبر 🌐\n"
+        "• أرسل وصف خبر (>20 حرف) 📝\n"
+        "• أرسل صورة + كابشن 📸\n"
+        "• أرسل فيديو + كابشن 🎬\n"
+        "→ يسألك: عندك صورة/فيديو؟\n"
+        "  • نعم → ارفع → يصمم\n"
         "  • لا → يبحث/يولّد تلقائياً\n\n"
-        "/cancel ← إلغاء العملية المعلّقة"
+        "🌐 *اللغات:*\n"
+        "• `/lang ar` ← العربية افتراضي\n"
+        "• `/lang en` ← English افتراضي\n"
+        "• `/lang fr` ← Français افتراضي\n"
+        "• `/lang off` ← اسأل كل مرة\n\n"
+        "🛠️ *عام:*\n"
+        "• `/start` ← الترحيب\n"
+        "• `/status` ← حالة البوت\n"
+        "• `/cancel` ← إلغاء العملية\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🎬 *للفيديو:*\n"
+        "• الحد الأقصى: 3 دقائق\n"
+        "• الحجم الأقصى: 100 MB"
     )
-    await update.message.reply_text(msg)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_status(update, ctx):
@@ -129,7 +144,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 2.5 (ريلز + شعار صفحة)"
+        "• الإصدار: 2.6 (ريلز كامل + كابشن حماسي)"
     )
     await update.message.reply_text(msg)
 
@@ -143,6 +158,46 @@ async def cmd_cancel(update, ctx):
         await update.message.reply_text("لا توجد عملية معلّقة")
 
 
+async def cmd_lang(update, ctx):
+    """Set default language to skip language picker.
+    Usage: /lang ar | /lang en | /lang fr | /lang off"""
+    user_id = update.effective_user.id
+    text = (update.message.text or "").strip().lower()
+    parts = text.split(maxsplit=1)
+
+    if len(parts) < 2:
+        current = USER_PREFS.get(user_id, {}).get("default_lang", "off")
+        await update.message.reply_text(
+            f"🌐 *اللغة الافتراضية الحالية*: `{current}`\n\n"
+            f"الأوامر:\n"
+            f"• `/lang ar` ← العربية دائماً\n"
+            f"• `/lang en` ← English دائماً\n"
+            f"• `/lang fr` ← Français دائماً\n"
+            f"• `/lang off` ← اسأل في كل مرة (الافتراضي)",
+            parse_mode="Markdown"
+        )
+        return
+
+    choice = parts[1]
+    if choice in ("ar", "en", "fr"):
+        USER_PREFS.setdefault(user_id, {})["default_lang"] = choice
+        labels = {"ar": "🇸🇦 العربية", "en": "🇬🇧 English", "fr": "🇫🇷 Français"}
+        await update.message.reply_text(
+            f"✅ تم تعيين {labels[choice]} كلغة افتراضية\n"
+            f"لن أسألك عن اللغة بعد الآن.\n"
+            f"لإلغاء: `/lang off`",
+            parse_mode="Markdown"
+        )
+    elif choice == "off":
+        if user_id in USER_PREFS:
+            USER_PREFS[user_id].pop("default_lang", None)
+        await update.message.reply_text("✅ سأسألك عن اللغة في كل مرة الآن.")
+    else:
+        await update.message.reply_text(
+            "❌ خيار غير معروف. استخدم: ar / en / fr / off"
+        )
+
+
 def parse_count(text):
     text = (text or "").strip().lower()
     text = text.replace("/post", "").replace("منشور", "").strip()
@@ -154,65 +209,55 @@ def parse_count(text):
     return 1
 
 
-async def composite_video_into_design(design_png, design_box, video_path, output_mp4):
+async def composite_video_into_design(bg_png, overlay_png, design_box, video_path, output_mp4):
     """
-    Composite a video INTO the 4Ever design as the central video element.
+    Composite a video INTO the 4Ever design with 3 layers:
     
-    Args:
-        design_png: Path to the 1080x1080 post image (with frame from video's first frame).
-        design_box: (gx, gy, w, h) tuple - where the image is in the design.
-        video_path: Original user video.
-        output_mp4: Output MP4 path.
+    Layer 1 (bottom): bg_png    - cosmic background + header logos
+    Layer 2 (middle): video     - user video scaled to fit design_box
+    Layer 3 (top):    overlay   - source logo, trend arrow, badges, headline (RGBA)
     
-    The technique:
-    1. Use design_png as a background image
-    2. Crop+scale video to fit the design_box
-    3. Overlay video on top of design_png at (gx, gy)
-    4. Output 1080x1080 MP4 (Instagram/Facebook reels-ready)
+    Result: 1080x1080 MP4 reel with FULL 4Ever branding on top of the video.
     """
     import subprocess
     import imageio_ffmpeg
 
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
     gx, gy, w, h = design_box
-    logger.info(f"🎬 Compositing video into design at ({gx},{gy}) size {w}x{h}")
+    logger.info(f"🎬 3-layer composite at ({gx},{gy}) size {w}x{h}")
 
-    # ffmpeg approach:
-    #   - input 1: design.png (loop as video)
-    #   - input 2: original video (scale to fit box, with audio)
-    #   - overlay video onto design at (gx, gy)
-    #   - output as MP4 1080x1080, max 60s, with audio from source
-    
-    # Build filter:
-    #   - Scale video to fit inside box, preserving aspect ratio (cover entire box)
-    #   - "scale=W:H:force_original_aspect_ratio=increase,crop=W:H" = fill box, crop excess
-    
+    # Filter:
+    # [0]=bg.png (looped), [1]=video, [2]=overlay.png (looped)
+    # - Scale video to fill box
+    # - Overlay video on bg at (gx, gy)
+    # - Then overlay the badges/source/headline RGBA on top
     filter_complex = (
-        f"[0:v]format=rgba[bg];"
         f"[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
         f"crop={w}:{h}[vid];"
-        f"[bg][vid]overlay={gx}:{gy}:shortest=1[out]"
+        f"[0:v][vid]overlay={gx}:{gy}[bg_with_vid];"
+        f"[bg_with_vid][2:v]overlay=0:0:shortest=1[out]"
     )
 
     try:
         cmd = [
             ffmpeg_bin, "-y",
-            "-loop", "1", "-i", design_png,          # input 0: design as static
-            "-i", video_path,                         # input 1: source video
+            "-loop", "1", "-i", bg_png,              # input 0: background layer
+            "-i", video_path,                         # input 1: user video
+            "-loop", "1", "-i", overlay_png,         # input 2: overlay (badges/headline)
             "-filter_complex", filter_complex,
             "-map", "[out]",
-            "-map", "1:a?",
+            "-map", "1:a?",                          # audio from video
             "-c:v", "libx264",
-            "-preset", "ultrafast",                  # 🚀 fastest encoding
-            "-crf", "28",                            # slightly lower quality, much faster
+            "-preset", "ultrafast",
+            "-crf", "28",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
-            "-b:a", "96k",                           # smaller audio
+            "-b:a", "96k",
             "-ar", "44100",
             "-shortest",
             "-movflags", "+faststart",
-            "-t", "120",                             # Cap at 2 minutes max
-            "-threads", "0",                         # use all cores
+            "-t", "180",                             # 🆕 Cap at 3 minutes (was 2)
+            "-threads", "0",
             output_mp4
         ]
         logger.info(f"   Running ffmpeg composite (ultrafast preset)...")
@@ -250,25 +295,37 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
 
     # 🎬 VIDEO MODE: build a video reel with 4Ever frame
     if video_path and os.path.exists(video_path):
-        await progress.edit_text("🎨 جاري تصميم إطار المنشور...")
+        await progress.edit_text("🎨 جاري تصميم طبقات المنشور...")
 
-        # Generate the design and get the box coords of the image area
-        # We use return_box=True to know exactly where to overlay the video
-        def _gen():
-            return generate_post(cfg, out_path, return_box=True)
-        result = await loop.run_in_executor(None, _gen)
-        design_path, box_coords = result
+        # Generate two layers: background and overlay (badges/source/headline)
+        bg_layer = str(OUTPUT_DIR / f"bg_{os.getpid()}_{id(news)}.png")
+        overlay_layer = str(OUTPUT_DIR / f"ov_{os.getpid()}_{id(news)}.png")
+
+        def _gen_layers():
+            return generate_post_layers(cfg, bg_layer, overlay_layer)
+        box_coords = await loop.run_in_executor(None, _gen_layers)
+
+        # Also generate fallback static image (in case ffmpeg fails)
+        def _gen_static():
+            return generate_post(cfg, out_path)
+        await loop.run_in_executor(None, _gen_static)
 
         await progress.edit_text(
-            "🎬 جاري دمج الفيديو في تصميم 4Ever...\n"
-            "⏳ هذا قد يستغرق دقيقة..."
+            "🎬 جاري دمج الفيديو في تصميم 4Ever الكامل...\n"
+            "🏷️ يتضمن: شعار المصدر + سهم الترند + البادجات\n"
+            "⏳ سيستغرق 2-4 دقائق..."
         )
 
-        # Composite video into the design's image area
+        # Composite: bg → video → overlay (3 layers)
         video_out = str(OUTPUT_DIR / f"reel_{os.getpid()}_{id(news)}.mp4")
         success = await composite_video_into_design(
-            design_path, box_coords, video_path, video_out
+            bg_layer, overlay_layer, box_coords, video_path, video_out
         )
+
+        # Cleanup intermediate layers
+        for p in [bg_layer, overlay_layer]:
+            try: os.unlink(p)
+            except: pass
 
         if success and os.path.exists(video_out):
             # Send as VIDEO reel
@@ -410,18 +467,43 @@ URL_PATTERN = re.compile(r'https?://[^\s]+')
 
 async def ask_about_language(message, ctx, callback_kind, payload):
     """Ask user which language for the upcoming post.
-    callback_kind: 'auto' | 'url' | 'text' | 'photo_caption'
-    payload: dict with data needed to continue
+    If user has a default language set, skip the picker.
     """
     user_id = message.from_user.id
 
-    # Store pending payload with chat_id (so we can reply in the right chat later)
+    # Check for saved default language
+    default_lang = USER_PREFS.get(user_id, {}).get("default_lang")
+    if default_lang:
+        # Skip picker, go straight to execution
+        logger.info(f"   Using saved default lang: {default_lang}")
+        progress = await message.reply_text(
+            f"🚀 جاري التنفيذ باللغة المحفوظة: {default_lang.upper()}..."
+        )
+        try:
+            if callback_kind == "auto":
+                count = payload.get("count", 1)
+                for i in range(1, count + 1):
+                    await generate_and_send_one_with_lang(progress, user_id, i, count, default_lang, ctx)
+                if count > 1:
+                    await message.reply_text(f"✅ تم توليد {count} منشورات!")
+            elif callback_kind == "url":
+                await execute_reverse_url(progress, user_id, payload["url"], payload["full_text"], default_lang, ctx)
+            elif callback_kind == "text":
+                await execute_reverse_text(progress, user_id, payload["text"], default_lang, ctx)
+            elif callback_kind == "photo_caption":
+                await execute_reverse_photo_caption(progress, user_id, payload["caption"], default_lang, ctx)
+        except Exception as e:
+            logger.error(f"Direct lang dispatch failed: {e}\n{traceback.format_exc()}")
+            await message.reply_text(f"❌ فشل: {str(e)[:200]}")
+        return
+
+    # No default - ask normally
     PENDING_NEWS[user_id] = {
         "kind": "lang_choice",
         "callback_kind": callback_kind,
         "payload": payload,
         "chat_id": message.chat_id,
-        "user_id": user_id,  # explicit
+        "user_id": user_id,
     }
 
     keyboard = [[
@@ -635,9 +717,9 @@ async def handle_image_choice(update, ctx):
             f"   • تُستخدم مباشرة في التصميم\n\n"
             f"🎬 *فيديو* (MP4/MOV)\n"
             f"   • يُدمج داخل تصميم 4Ever (ريلز كامل)\n"
-            f"   ⚠️ *الحد الأقصى للمدة: 2 دقيقة*\n"
+            f"   ⚠️ *الحد الأقصى للمدة: 3 دقائق*\n"
             f"   ⚠️ *الحد الأقصى للحجم: 100 MB*\n"
-            f"   ⏱ المعالجة تستغرق 2-4 دقائق\n"
+            f"   ⏱ المعالجة تستغرق 3-5 دقائق\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
             f"📰 العنوان: {news.get('headline_line1','')[:60]}\n\n"
             f"⏳ بانتظار محتواك...\n"
@@ -775,13 +857,13 @@ async def handle_video(update, ctx):
 
         # Check limits
         MAX_SIZE_MB = 100
-        MAX_DURATION_S = 120  # 2 minutes
+        MAX_DURATION_S = 180  # 3 minutes
 
         warnings = []
         if file_size_mb > MAX_SIZE_MB:
             warnings.append(f"⚠️ الحجم {file_size_mb:.1f}MB يتجاوز الحد الأقصى {MAX_SIZE_MB}MB")
         if duration_s > MAX_DURATION_S:
-            warnings.append(f"⚠️ المدة {duration_s}s تتجاوز الحد الأقصى {MAX_DURATION_S}s (سيُقص لـ 2 دقيقة)")
+            warnings.append(f"⚠️ المدة {duration_s}s تتجاوز الحد الأقصى {MAX_DURATION_S}s (سيُقص لـ 3 دقائق)")
 
         if file_size_mb > MAX_SIZE_MB * 1.5:  # too large, abort
             await update.message.reply_text(
@@ -802,7 +884,7 @@ async def handle_video(update, ctx):
             f"📊 الحجم: {file_size_mb:.1f}MB | المدة: {duration_s}s\n"
             f"{warning_text}\n"
             f"🎨 سأدمجه داخل تصميم 4Ever الكامل\n"
-            f"⏳ سيستغرق 2-4 دقائق على Render Free...\n"
+            f"⏳ سيستغرق 3-5 دقائق على Render Free...\n"
             f"☕ خذ كوب قهوة وأرجع!",
             parse_mode="Markdown"
         )
@@ -936,7 +1018,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v2.5 (reels+brand-logo)...")
+    logger.info("🤖 Starting 4Ever Bot v2.6 (full-branding-reels)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -944,6 +1026,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("post", cmd_post))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("lang", cmd_lang))
 
     # Callback query handlers for inline buttons
     app.add_handler(CallbackQueryHandler(handle_image_choice, pattern=r"^img_(yes|no)_\d+$"))
