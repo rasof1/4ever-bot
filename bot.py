@@ -17,7 +17,8 @@ from telegram.ext import (
 from post_generator import generate_post, generate_post_layers
 from news_scout import (
     scout_news, download_image, reverse_scout, fetch_url_content,
-    acquire_validated_image, LANG_INSTRUCTIONS, DIALECTS,
+    acquire_validated_image, LANG_INSTRUCTIONS, DIALECTS, smart_scout,
+    extract_post_from_screenshot,
 )
 
 logging.basicConfig(
@@ -151,7 +152,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.0 (OCR لقطات الشاشة + روابط جميع المنصات)"
+        "• الإصدار: 3.1 (12 موديل + Validator صارم + فيديو بدون أسود + برومبت نظيف)"
     )
     await update.message.reply_text(msg)
 
@@ -261,8 +262,8 @@ async def composite_video_into_design(bg_png, overlay_png, design_box, video_pat
     # - Overlay video on bg at (gx, gy)
     # - Then overlay the badges/source/headline RGBA on top
     filter_complex = (
-        f"[1:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black[vid];"
+        # Since box was sized to match video aspect, scale directly fits perfectly
+        f"[1:v]scale={w}:{h}:flags=lanczos[vid];"
         f"[0:v][vid]overlay={gx}:{gy}[bg_with_vid];"
         f"[bg_with_vid][2:v]overlay=0:0:shortest=1[out]"
     )
@@ -343,7 +344,8 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
         overlay_layer = str(OUTPUT_DIR / f"ov_{os.getpid()}_{id(news)}.png")
 
         def _gen_layers():
-            return generate_post_layers(cfg, bg_layer, overlay_layer)
+            return generate_post_layers(cfg, bg_layer, overlay_layer,
+                                         media_w=vid_w, media_h=vid_h)
         box_coords = await loop.run_in_executor(None, _gen_layers)
 
         # Also generate fallback static image (in case ffmpeg fails)
@@ -1327,7 +1329,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.0 (OCR+all-social-platforms+all-bugs-fixed)...")
+    logger.info("🤖 Starting 4Ever Bot v3.1 (12-models+strict-validator+exact-video-aspect+clean-prompts)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))

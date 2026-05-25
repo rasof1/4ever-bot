@@ -16,11 +16,22 @@ if not GEMINI_API_KEY:
 
 # Fallback chain - each model has SEPARATE daily quota in Gemini Free Tier
 FALLBACK_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-flash-latest",
+    # Tier 1: Best quality (try these first)
+    "gemini-2.5-pro",                  # Pro - best for complex reasoning (low quota)
+    "gemini-2.5-flash",                # Flash 2.5 - great balance
+    "gemini-2.5-flash-lite",           # Lite 2.5 - separate quota
+    # Tier 2: 2.0 family (good quality, separate quotas)
+    "gemini-2.0-flash",                # Flash 2.0
+    "gemini-2.0-flash-lite",           # Lite 2.0
+    "gemini-2.0-flash-001",            # Stable 2.0
+    # Tier 3: Latest aliases (always-available endpoints)
+    "gemini-flash-latest",             # Latest flash
+    "gemini-flash-lite-latest",        # Latest flash-lite
+    # Tier 4: Legacy 1.5 family (last resort, high quotas)
+    "gemini-1.5-flash",                # Stable 1.5
+    "gemini-1.5-flash-8b",             # 8B variant (high quota)
+    "gemini-1.5-flash-latest",         # Latest 1.5
+    "gemini-1.5-pro",                  # Pro 1.5 (highest context)
 ]
 _env_model = os.getenv("GEMINI_MODEL")
 if _env_model:
@@ -106,94 +117,79 @@ LOGO_DOMAINS = {
 }
 
 
-PROMPT_TEMPLATE = r"""أنت كاتب محتوى تقني محترف لصفحة عربية "4Ever".
+PROMPT_TEMPLATE = r"""أنت كاتب محتوى تقني عربي محترف لصفحة "4Ever".
 
 ابحث في الإنترنت عن آخر خبر حديث ومثير من آخر 7 أيام في أحد هذه المجالات:
 - الذكاء الاصطناعي (OpenAI, Anthropic, Google, Meta, Microsoft, xAI)
-- الهواتف الذكية (Apple, Samsung, Xiaomi, Google Pixel, OnePlus)
+- الهواتف الذكية (Apple, Samsung, Xiaomi, Google Pixel, OnePlus, Huawei)
 - الألعاب (PlayStation, Xbox, Nintendo, Steam)
-- التقنيات (NVIDIA, AMD, Intel, شرائح)
-- التسريبات التقنية
-- التقنيات الناشئة (سيارات ذاتية، روبوتات، VR/AR)
+- الشرائح (NVIDIA, AMD, Intel, Qualcomm)
+- التسريبات والتقنيات الناشئة
 
-تنويع: لو غطّيت AI، اختر هاتف أو لعبة في المرة القادمة.
+تنويع: غطّ مجالاً مختلفاً في كل مرة.
 
 ⚠️ قواعد العنوان:
-- headline_line1: أقصى 35 حرف عربي
-- headline_line2_ar: أقصى 18 حرف عربي
+- headline_line1: عنوان عربي فصحى - أقصى 35 حرف
+- headline_line2_ar: سطر ثانوي عربي فصحى - أقصى 18 حرف
 - headline_line2_en: اسم منتج إنجليزي قصير أو فارغ
 
 🎯 image_query (مهم جداً):
-- يحدد المنتج/التطبيق الفعلي بدقة، ليس الموضوع العام
+- يحدد المنتج/التطبيق بدقة، ليس الموضوع العام
 - جيد: "Apple iPhone 17 Pro Max product render"
-- جيد: "CapCut Google Gemini integration screenshot"
-- سيء: "AI" / "smartphone" (عام)
+- جيد: "Samsung Galaxy S26 official announcement photo"
+- سيء: "AI" أو "smartphone" (عام جداً)
 
-🎨 image_prompt: وصف بصري إنجليزي تفصيلي للصورة
+🔥 الكابشن - قواعد إلزامية صارمة:
 
-🔥 الكابشن - مهم جداً يكون مليء بالحياة:
-استخدم النمط التالي بحرفية:
+1️⃣ ابدأ بهوك قوي مع إيموجي حماسي:
+   استخدم واحداً من: 🚨 ⚡ 💥 🔥 🤯
+   مثال على الهيكل (ليس النص الحرفي): إيموجي + كلمة جذابة + الحدث + إيموجي
 
-📌 ابدأ بهوك قوي مع إيموجي مميز:
-   🚨 رسميًا... [الحدث] دخل المعركة! 🔥
-   أو: ⚡ خبر عاجل! [الشركة] قلبت الموازين 😱
-   أو: 💥 [الحدث] انفجر الآن!
+2️⃣ شرح حماسي بفقرة (2-3 أسطر) مع إيموجي داخل النص (🤯 😱 😮)
 
-📌 شرح في فقرة واحدة جذابة (سطرين-ثلاثة) مع إيموجيات داخلية:
-   "[الشركة] أعلنت عن [الميزة] علشان [الفائدة]... ودي ممكن تكون واحدة من أخطر الخطوات اللي حصلت في [المجال] مؤخرًا 🤯"
+3️⃣ سيناريو محسوس يبدأ بـ "تخيل..." أو "تصور..." مع إيموجي مناسب
 
-📌 سيناريو محسوس (تخيّل كده):
-   "تخيل كده... بدل ما تفتح 5 تطبيقات... 😮"
+4️⃣ قائمة ميزات أو نقاط - كل سطر يبدأ بإيموجي مختلف:
+   🎬 ... 🎨 ... ⚡ ... 🧠 ... 🚀 ...
 
-📌 قائمة ميزات بإيموجيات مختلفة:
-   🎬 "اعملي مونتاج سينمائي للفيديو ده"
-   🎨 "خلّي الألوان أقرب لأفلام Netflix"
-   ⚡ "ضيف transitions سريعة وحماسية"
-   🧠 "أديني فكرة Intro تشد الانتباه"
+5️⃣ لحظة الإبهار: ابدأ بسؤال مثل "والأكثر إثارة؟" أو "أكثر شيء لافت؟"
 
-📌 لحظة الإبهار (واللي صراحة خلاني أنبهر؟):
-   "إن [الذكاء الاصطناعي] مش بس بيعمل [س]... لا، ده كمان [ص]! 🔥🤖"
+6️⃣ قائمة بنقاط ذهبية - كل سطر يبدأ بـ ✨
 
-📌 قائمة بإيموجي ✨:
-   ✨ تطوير الفكرة
-   ✨ اقتراح أسلوب التصوير
-   ✨ كتابة السكريبت
+7️⃣ خاتمة فلسفية قصيرة مع 🚀
 
-📌 خاتمة فلسفية مع شرارة:
-   "إحنا حرفيًا داخلين على عصر جديد... 🚀"
+8️⃣ سؤال تفاعلي يبدأ بـ 🤔 وينتهي بـ 👇
 
-📌 سؤال تفاعلي:
-   "🤔 شو رأيكم؟ هل [س] هتغير اللعبة فعلاً؟ شاركونا في الكومنتات 👇"
+9️⃣ CTA الإلزامي: "💡 لمزيد من التحديثات الحصرية، اشترك في 4Ever الآن!"
 
-📌 CTA:
-   "💡 لمزيد من التحديثات الحصرية، اشترك في 4Ever الآن!"
+⚠️ قواعد صارمة جداً للكابشن:
+- 12-20 إيموجي على الأقل في الكابشن كله
+- فقرات منفصلة بسطر فارغ بينها
+- لغة عاطفية حماسية (ليست تقريراً صحفياً)
+- إذا الهوية كانت "الفصحى"، استخدم العربية الفصحى المعاصرة فقط - بدون أي لهجة
+- إذا كانت لهجة معينة (مصرية/شامية/سعودية/إلخ)، استخدم اللهجة المحددة بنقاء - لا تمزج بين لهجات
+- لا تنسخ أمثلة من تعليمات أخرى - اكتب محتوى أصلياً يناسب الخبر الفعلي
+- العنوان دائماً بالفصحى، الكابشن باللهجة المطلوبة
 
-🏷️ hashtags (5-8 وسوم):
-- 3 عامة: #تقنية #ذكاء_اصطناعي #4Ever
-- 3-5 محددة بالخبر (شركة + منتج + موضوع)
+🏷️ hashtags: 5-8 وسوم
+- 3 عامة (#تقنية #ذكاء_اصطناعي #4Ever)
+- 3-5 محددة بالخبر (#اسم_الشركة #اسم_المنتج)
 
-⚠️ مهم جداً:
-- لا تكتب كابشن جاف مثل تقرير صحفي
-- استخدم إيموجيات بكثرة (10-20 إيموجي على الأقل في الكابشن)
-- استخدم فواصل بصرية بين الفقرات (سطر فارغ)
-- لغة عاطفية وحماسية مثل المؤثرين على السوشيال
-- لو لغة المنشور إنجليزية أو فرنسية، نفس النمط بحماس وايموجيات
-
-أنتج JSON فقط بدون code fences:
+أنتج JSON صالح فقط بدون code fences وبدون أي نص قبله أو بعده:
 
 {{
-  "headline_line1": "عنوان عربي قصير - أقصى 35 حرف",
-  "headline_line2_ar": "السطر 2 - أقصى 18 حرف",
-  "headline_line2_en": "اسم منتج إنجليزي قصير أو فارغ",
+  "headline_line1": "...",
+  "headline_line2_ar": "...",
+  "headline_line2_en": "...",
   "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai|samsung|sony|nintendo|xiaomi|amd|intel|playstation|xbox|qualcomm|mcit|egypt|huawei|tesla|spacex",
   "category": "ai|phone|gaming|hardware|leak|emerging",
-  "product_badge": "تسمية إنجليزية قصيرة",
-  "live_badge": "مواصفات إنجليزية قصيرة",
-  "caption": "كابشن مليء بالحياة بالنمط أعلاه - 10-20 إيموجي - فقرات منظمة - سؤال تفاعلي - CTA",
+  "product_badge": "...",
+  "live_badge": "...",
+  "caption": "كابشن كامل بكل القواعد أعلاه",
   "hashtags": ["#وسم1", "#وسم2", "#وسم3", "#وسم4", "#وسم5"],
-  "image_prompt": "وصف بصري إنجليزي تفصيلي",
-  "image_query": "بحث محدد - شركة + منتج + screenshot/photo/render",
-  "source_url": "رابط المقال"
+  "image_prompt": "وصف بصري إنجليزي تفصيلي للصورة المثالية",
+  "image_query": "بحث محدد - اسم الشركة + اسم المنتج + نوع الصورة (photo/render/screenshot/announcement)",
+  "source_url": "رابط المقال الأصلي"
 }}
 
 {extra_instructions}"""
@@ -453,8 +449,21 @@ def _call_gemini(prompt, body_overrides=None):
                 last_err = RuntimeError(f"Empty response from {model}")
                 continue
             cand = data["candidates"][0]
-            parts = cand.get("content", {}).get("parts", [])
-            text = "".join(p.get("text", "") for p in parts)
+            content_obj = cand.get("content", {})
+            if not isinstance(content_obj, dict):
+                last_err = RuntimeError(f"Unexpected content type from {model}: {type(content_obj)}")
+                continue
+            parts = content_obj.get("parts", [])
+            if not isinstance(parts, list):
+                last_err = RuntimeError(f"Parts not a list from {model}")
+                continue
+            text_pieces = []
+            for p in parts:
+                if isinstance(p, dict):
+                    text_pieces.append(p.get("text", ""))
+                elif isinstance(p, str):
+                    text_pieces.append(p)
+            text = "".join(text_pieces)
             if not text:
                 last_err = RuntimeError(f"No text from {model}")
                 continue
@@ -545,9 +554,9 @@ def scout_multiple(count, lang="ar"):
 # REVERSE MODE: Receive URL/text/screenshot → generate post
 # ═══════════════════════════════════════════════════════════════
 
-REVERSE_PROMPT = r"""أنت محرر تقني محترف لصفحة عربية "4Ever".
+REVERSE_PROMPT = r"""أنت محرر تقني عربي محترف لصفحة "4Ever".
 
-استلمت المحتوى التالي من المستخدم وأريدك أن تحوّله إلى منشور 4Ever احترافي مليء بالحياة.
+استلمت المحتوى التالي من المستخدم وعليك تحويله إلى منشور 4Ever احترافي مليء بالحياة.
 
 === المحتوى ===
 {user_content}
@@ -555,57 +564,46 @@ REVERSE_PROMPT = r"""أنت محرر تقني محترف لصفحة عربية "
 
 مهمتك:
 1. استخرج الفكرة الرئيسية
-2. تحقّق من صحة المعلومات (ابحث إذا احتجت)
+2. تحقّق من صحة المعلومات (ابحث في الإنترنت لو احتجت)
 3. أعد صياغته بأسلوب 4Ever الجذاب والحماسي
-4. image_query يصف المنتج الفعلي (شركة + منتج + screenshot/photo)
-5. أضف 5-8 هاشتاقات ترند
+4. image_query يصف المنتج الفعلي بدقة (شركة + منتج + نوع صورة)
+5. أضف 5-8 هاشتاقات
 
-🔥 الكابشن - مهم جداً يكون مليء بالحياة (مثل مؤثرين السوشيال):
+🔥 الكابشن - قواعد إلزامية صارمة:
 
-📌 هوك قوي مع إيموجي:
-   🚨 رسميًا... [الحدث]! 🔥
-   ⚡ خبر عاجل! [الشركة] قلبت الموازين 😱
+1️⃣ هوك قوي بإيموجي: 🚨 ⚡ 💥 🔥 🤯 + عبارة جذابة
+2️⃣ شرح حماسي (2-3 أسطر) مع إيموجي داخل النص
+3️⃣ سيناريو "تخيل..." أو "تصور..." 😮
+4️⃣ قائمة ميزات - كل سطر إيموجي مختلف: 🎬 🎨 ⚡ 🧠 🚀
+5️⃣ لحظة الإبهار: "والأكثر إثارة؟"
+6️⃣ قائمة ✨ نقاط ذهبية
+7️⃣ خاتمة فلسفية 🚀
+8️⃣ سؤال تفاعلي 🤔 ... 👇
+9️⃣ CTA: "💡 لمزيد من التحديثات الحصرية، اشترك في 4Ever الآن!"
 
-📌 شرح بفقرة جذابة (2-3 أسطر) مع إيموجي داخلي 🤯
+⚠️ قواعد صارمة:
+- 12-20 إيموجي في الكابشن
+- فقرات منفصلة
+- لغة حماسية (ليس تقرير صحفي)
+- استخدم اللهجة/اللغة المحددة بنقاء (لا تمزج بين لهجات)
+- لا تنسخ أمثلة - اكتب محتوى أصلياً
+- العنوان دائماً بالفصحى
 
-📌 سيناريو محسوس (تخيّل كده... 😮)
-
-📌 قائمة ميزات بإيموجي مختلف لكل سطر:
-   🎬 "..." 
-   🎨 "..."
-   ⚡ "..."
-   🧠 "..."
-
-📌 لحظة إبهار (واللي صراحة خلاني أنبهر؟): "إن X مش بس بيعمل Y... لا، ده كمان Z! 🔥"
-
-📌 قائمة بـ ✨:
-   ✨ ميزة 1
-   ✨ ميزة 2
-   ✨ ميزة 3
-
-📌 خاتمة فلسفية مع 🚀
-
-📌 سؤال تفاعلي: "🤔 شو رأيكم؟ ... شاركونا 👇"
-
-📌 CTA: "💡 لمزيد من التحديثات الحصرية، اشترك في 4Ever الآن!"
-
-⚠️ مهم: 10-20 إيموجي في الكابشن، فقرات منفصلة، لغة حماسية، لا تقرير صحفي جاف.
-
-أنتج JSON فقط:
+أنتج JSON صالح فقط بدون code fences:
 
 {{
-  "headline_line1": "عنوان عربي قصير - أقصى 35 حرف",
-  "headline_line2_ar": "السطر 2 - أقصى 18 حرف",
-  "headline_line2_en": "اسم منتج إنجليزي قصير أو فارغ",
+  "headline_line1": "...",
+  "headline_line2_ar": "...",
+  "headline_line2_en": "...",
   "source": "google|openai|anthropic|github|meta|microsoft|apple|nvidia|xai|samsung|sony|nintendo|xiaomi|amd|intel|playstation|xbox|qualcomm|mcit|egypt|huawei|tesla|spacex",
   "category": "ai|phone|gaming|hardware|leak|emerging",
-  "product_badge": "تسمية إنجليزية قصيرة",
-  "live_badge": "مواصفات إنجليزية قصيرة",
-  "caption": "كابشن مليء بالحياة - 10-20 إيموجي - فقرات - سؤال - CTA",
-  "hashtags": ["#وسم1", "#وسم2", "#وسم3", "#وسم4", "#وسم5"],
-  "image_prompt": "وصف بصري إنجليزي تفصيلي",
-  "image_query": "بحث محدد - شركة + منتج + screenshot/photo/render",
-  "source_url": "الرابط الأصلي"
+  "product_badge": "...",
+  "live_badge": "...",
+  "caption": "كابشن كامل",
+  "hashtags": ["#وسم1", "#وسم2"],
+  "image_prompt": "وصف بصري إنجليزي",
+  "image_query": "بحث محدد - شركة + منتج + نوع",
+  "source_url": ""
 }}
 """
 
@@ -858,80 +856,95 @@ def fetch_url_content(url):
 
 
 def validate_post_with_ai(news_data, image_path):
+    """Strict AI Vision check: does this image MATCH the news headline?
+    Returns (is_valid: bool, issues: list, reason: str).
     """
-    Final AI quality check: does the image actually match the news?
-    Uses Gemini Vision to verify.
-    Returns: (is_valid, issues_list, suggestions)
-    """
-    log.info("🔍 Final AI validator: checking image-headline coherence...")
+    import base64
+    headline_ar = news_data.get("headline_line1", "")
+    headline_en = news_data.get("headline_line2_en", "")
+    source = news_data.get("source", "")
+    image_query = news_data.get("image_query", "")
+    category = news_data.get("category", "")
+
     try:
-        # Encode image as base64
-        import base64
         with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
-
-        # Detect mime type
-        from PIL import Image
-        with Image.open(image_path) as img:
-            fmt = img.format.lower() if img.format else "jpeg"
-        mime = f"image/{'jpeg' if fmt == 'jpg' else fmt}"
-
-        validate_prompt = (
-            f"أنا أعمل منشور تقني عن: {news_data['headline_line1']}\n"
-            f"المنتج: {news_data.get('headline_line2_en','')}\n"
-            f"المصدر: {news_data.get('source','')}\n\n"
-            "تفحّص الصورة المرفقة:\n"
-            "1. هل الصورة تتعلق فعلاً بالموضوع؟\n"
-            "2. هل تحتوي على ما يخدم الخبر بصرياً؟\n\n"
-            'أجب بـ JSON فقط: {"matches": true/false, "reason": "سبب قصير"}'
-        )
-
-        body = {
-            "contents": [{
-                "parts": [
-                    {"text": validate_prompt},
-                    {"inline_data": {"mime_type": mime, "data": img_b64}}
-                ]
-            }],
-            "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": 200,
-                "thinkingConfig": {"thinkingBudget": 0},
-            }
-        }
-
-        # Try just the first 2 fast models for validation (save quota)
-        for model in FALLBACK_MODELS[:2]:
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-                r = requests.post(url, json=body, timeout=30)
-                if r.status_code != 200:
-                    continue
-                data = r.json()
-                if not data.get("candidates"):
-                    continue
-                text = "".join(p.get("text", "") for p in data["candidates"][0].get("content", {}).get("parts", []))
-                if not text:
-                    continue
-                result = extract_json(text)
-                matches = result.get("matches", True)
-                reason = result.get("reason", "")
-                if matches:
-                    log.info(f"   ✅ Image matches: {reason}")
-                    return (True, [], reason)
-                else:
-                    log.warning(f"   ⚠️  Image DOES NOT match: {reason}")
-                    return (False, [reason], reason)
-            except Exception as e:
-                log.warning(f"   Validator {model} failed: {e}")
-                continue
-
-        # If validator itself fails, assume OK (don't block on validator error)
-        log.warning("   ⚠️  Validator unavailable, proceeding")
-        return (True, [], "validator unavailable")
+            img_bytes = f.read()
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
     except Exception as e:
-        log.warning(f"   Validator error: {e}")
-        return (True, [], str(e))
+        return False, ["read_error"], str(e)
+
+    ext = image_path.lower().rsplit(".", 1)[-1]
+    mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+
+    prompt = f"""You are a STRICT image validator for tech news posts.
+
+NEWS DETAILS:
+- Arabic headline: {headline_ar}
+- English product/topic: {headline_en}
+- Source company: {source}
+- Category: {category}
+- Search query used: {image_query}
+
+QUESTION: Does this image SHOW the actual product/company/topic described in the news?
+
+STRICT RULES - REJECT if:
+- The image shows a DIFFERENT product (e.g. news is about NVIDIA GPU but image shows a bicycle)
+- The image is a generic stock photo unrelated to the topic
+- The image is a different brand than {source}
+- The image is empty/abstract/monochrome/blank
+- The image is just a logo without product context
+- The visual subject doesn't match the headline
+
+ACCEPT only if the image clearly shows the actual product/company/event from the news.
+
+Return JSON only (no code fences):
+{{
+  "matches": true,
+  "confidence": 85,
+  "what_image_shows": "Brief description of what is actually visible in the image",
+  "reason": "Why this matches or does not match the news"
+}}"""
+
+    body = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime, "data": img_b64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "thinkingConfig": {"thinkingBudget": 0},
+            "response_mime_type": "application/json",
+        }
+    }
+
+    for model in FALLBACK_MODELS[:3]:
+        try:
+            url = f"{GEMINI_API_BASE}/{model}:generateContent?key={GEMINI_API_KEY}"
+            r = requests.post(url, json=body, timeout=20)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                continue
+            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            text = text.strip().strip("```json").strip("```").strip()
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                continue
+            matches = parsed.get("matches", False)
+            confidence = parsed.get("confidence", 0)
+            reason = f"{parsed.get('what_image_shows', '')[:100]} | {parsed.get('reason', '')[:100]}"
+            is_valid = bool(matches) and confidence >= 60
+            return is_valid, [] if is_valid else ["mismatch"], reason
+        except Exception as e:
+            log.warning(f"   Validator {model} failed: {str(e)[:100]}")
+            continue
+    return True, [], "validator unavailable"
 
 
 def _is_image_visually_meaningful(image_path):

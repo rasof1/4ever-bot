@@ -525,72 +525,104 @@ def generate_post(config: dict, output_path: str, seed: int = None,
     return output_path
 
 
-def generate_post_layers(config: dict, bg_path: str, overlay_path: str, seed: int = None):
+def generate_post_layers(config: dict, bg_path: str, overlay_path: str, seed: int = None,
+                          media_w: int = None, media_h: int = None):
     """
     Generate the post as TWO layers + box coords:
-    - bg_path: 1080x1080 PNG with cosmic background + stars + headers (no main image)
-    - overlay_path: 1080x1080 RGBA PNG with badges, source logo, trend arrow, headline (transparent center)
-    - returns (gx, gy, tw, th) where the main image SHOULD go (between layers)
+    - bg_path: cosmic background + stars + headers (no main image)
+    - overlay_path: RGBA with badges, source, trend arrow, headline (transparent center)
+    - returns (gx, gy, tw, th) where the media should go
     
-    For video composite:
-    [bg_layer] → [video centered at gx,gy] → [overlay_layer] = final reel
+    If media_w/media_h provided, the frame is sized to match THAT aspect ratio exactly.
     """
     size = config["output"]["size"]
     canvas_height = config.get("canvas_height") or size
 
-    # ===== LAYER 1: Background (everything that goes BEHIND the main image) =====
+    # ===== LAYER 1: Background =====
     bg_canvas_path = ROOT / config["background"]["file"]
     bg_canvas = prepare_background(bg_canvas_path, size, config["background"]["darken_amount"], height=canvas_height)
     bg_canvas = add_star_particles(bg_canvas, seed=seed or 4)
 
-    # Add header elements (logo, social icons) - these go BEHIND content
+    # Header
     draw_logo(bg_canvas, config["page"]["logo_text"], config["page"]["primary_color"])
     if config["socials"]["show"]:
         draw_social_icons(bg_canvas, config["socials"]["icons"], config["page"]["name"])
 
-    # Compute where the main image will go (we need consistent box coords)
-    # We use a dummy 16:9 transparent image to compute the box
-    dummy_img = Image.new("RGB", (1280, 720), (0, 0, 0))
-    dummy_path = str(ROOT / "output" / f"_dummy_{os.getpid()}.png")
-    os.makedirs(os.path.dirname(dummy_path), exist_ok=True)
-    dummy_img.save(dummy_path)
+    # 🎯 Compute box coords directly (no dummy image hack)
+    W, H = bg_canvas.size
+    SAFE_TOP = 175
+    HEADLINE_RESERVED = 400
+    SAFE_BOTTOM = H - HEADLINE_RESERVED
+    SAFE_WIDTH = int(W * 0.85)
+    available_h = SAFE_BOTTOM - SAFE_TOP
+    available_w = SAFE_WIDTH
 
-    # Temporarily paste to get coords (will be overlaid by video later)
-    # Draw a subtle glow/border in the bg layer where the image will go
-    gx, gy, tw, th = paste_main_asset(
-        bg_canvas, dummy_path,
-        target_w=880,
-        radius=config["main_asset"]["corner_radius"],
-        glow_color=config["main_asset"]["glow_color"],
-        glow_alpha=config["main_asset"]["glow_intensity"]
+    # If media dimensions given, frame matches that exact aspect (no padding!)
+    if media_w and media_h:
+        aspect = media_w / media_h
+        avail_aspect = available_w / available_h
+        if aspect >= avail_aspect:
+            frame_w = available_w
+            frame_h = int(frame_w / aspect)
+        else:
+            frame_h = available_h
+            frame_w = int(frame_h * aspect)
+    else:
+        # Default: use full available area
+        frame_w = available_w
+        frame_h = available_h
+
+    target_w = frame_w
+    target_h = frame_h
+    gx = (W - target_w) // 2
+    gy = SAFE_TOP + (available_h - target_h) // 2
+
+    # 🎨 Draw glow effect for the frame (so it shows behind the video)
+    glow_size = 50
+    glow_color = config["main_asset"]["glow_color"]
+    glow_alpha = config["main_asset"]["glow_intensity"]
+    radius = config["main_asset"]["corner_radius"]
+    glow = Image.new("RGBA",
+                     (target_w + glow_size * 2, target_h + glow_size * 2),
+                     (0, 0, 0, 0))
+    ImageDraw.Draw(glow).rounded_rectangle(
+        (glow_size, glow_size, glow_size + target_w, glow_size + target_h),
+        radius=radius + 8, fill=(*hex_to_rgb(glow_color), min(glow_alpha + 30, 255))
     )
+    glow = glow.filter(ImageFilter.GaussianBlur(25))
+    bg_canvas.paste(glow, (gx - glow_size, gy - glow_size), glow)
 
     # Save background layer
     os.makedirs(os.path.dirname(bg_path) or ".", exist_ok=True)
     bg_canvas.save(bg_path, "PNG", quality=95)
-    try: os.unlink(dummy_path)
-    except: pass
 
-    # ===== LAYER 2: Overlay (everything that goes ON TOP of the main image) =====
-    overlay = Image.new("RGBA", (size, canvas_height), (0, 0, 0, 0))
+    # ===== LAYER 2: Overlay (badges + source + headline + decorations) =====
+    overlay = Image.new("RGBA", (W, canvas_height), (0, 0, 0, 0))
 
-    # Draw source logo (top-left of image)
+    # Border outline around frame (visible on top of video)
+    draw = ImageDraw.Draw(overlay)
+    draw.rounded_rectangle(
+        (gx - 3, gy - 3, gx + target_w + 3, gy + target_h + 3),
+        radius=radius + 3, outline=(255, 255, 255, 100), width=2
+    )
+
+    # Source logo (top-left of frame)
     draw_source_logo(overlay, gx, gy, config["source_logo"]["type"])
 
-    # Trend arrow (top-right of image)
+    # Trend arrow (top-right of frame)
     if config["trend_indicator"]["show"]:
-        overlay = draw_trend_arrow(overlay, gx, gy, tw, config["trend_indicator"]["color"])
+        overlay = draw_trend_arrow(overlay, gx, gy, target_w, config["trend_indicator"]["color"])
 
-    # Product badge (bottom-left of image)
+    # Product badge (bottom-left)
     if config["product_badge"]["show"]:
-        draw_product_badge(overlay, gx, gy, th, config["product_badge"]["text"])
+        draw_product_badge(overlay, gx, gy, target_h, config["product_badge"]["text"])
 
-    # Live badge (bottom-right of image)
+    # Live badge (bottom-right)
     if config["live_badge"]["show"]:
-        draw_live_badge(overlay, gx, gy, tw, th, config["live_badge"]["text"])
+        draw_live_badge(overlay, gx, gy, target_w, target_h, config["live_badge"]["text"])
 
-    # Headline (below the image)
-    line_y = draw_headline(overlay, gy, th, config["headline"])
+    # Headline (below the image area)
+    line_y = draw_headline(overlay, gy, target_h, config["headline"])
 
     # Decorations
     if config["decorations"]["corner_brackets"]:
@@ -598,7 +630,7 @@ def generate_post_layers(config: dict, bg_path: str, overlay_path: str, seed: in
     if config["decorations"]["decorative_line"]:
         draw_decorative_line(overlay, line_y, config["page"]["primary_color"])
 
-    # Re-draw header on top too (so it stays on top of any video frame leakage)
+    # Re-draw header on overlay too (above any video frame leakage)
     draw_logo(overlay, config["page"]["logo_text"], config["page"]["primary_color"])
     if config["socials"]["show"]:
         draw_social_icons(overlay, config["socials"]["icons"], config["page"]["name"])
@@ -606,4 +638,4 @@ def generate_post_layers(config: dict, bg_path: str, overlay_path: str, seed: in
     os.makedirs(os.path.dirname(overlay_path) or ".", exist_ok=True)
     overlay.save(overlay_path, "PNG")
 
-    return (gx, gy, tw, th)
+    return (gx, gy, target_w, target_h)
