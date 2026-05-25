@@ -1,6 +1,7 @@
 """4Ever Telegram Bot v2.3 — reverse mode with custom image upload option."""
 
 import os
+import time
 import re
 import asyncio
 import logging
@@ -40,6 +41,41 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # In-memory state: user_id → {"news": ..., "awaiting_image": bool}
 PENDING_NEWS = {}
+POST_HISTORY = {}  # user_id -> {news, cfg_template} for regeneration
+
+def cleanup_old_temp_files(user_id=None, max_age_seconds=300):
+    """Clean up old temporary files in OUTPUT_DIR.
+    Removes ALL files older than 5 minutes by default.
+    If user_id given, also removes files containing that user_id in their name.
+    Ensures no stale images leak into new requests.
+    """
+    try:
+        now = time.time()
+        cleaned = 0
+        for fname in os.listdir(OUTPUT_DIR):
+            fpath = OUTPUT_DIR / fname
+            try:
+                if not fpath.is_file():
+                    continue
+                # Always delete user-specific files
+                if user_id and str(user_id) in fname:
+                    fpath.unlink()
+                    cleaned += 1
+                    continue
+                # Delete anything older than max_age
+                age = now - fpath.stat().st_mtime
+                if age > max_age_seconds:
+                    fpath.unlink()
+                    cleaned += 1
+            except Exception:
+                pass
+        if cleaned:
+            logger.info(f"🧹 Cleaned {cleaned} old temp files")
+    except Exception as e:
+        logger.warning(f"Cleanup failed: {e}")
+
+
+
 USER_PREFS = {}  # user_id -> {"default_lang": "ar|en|fr"}
 
 
@@ -152,7 +188,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.2 (مختبر بالكامل - شفافية overlay + موديلات حقيقية + AI validator دائم)"
+        "• الإصدار: 3.3 (زر صورة AI جديدة + فلتر NSFW + التفاف العناوين + تنظيف تلقائي + جلسة جديدة لكل طلب)"
     )
     await update.message.reply_text(msg)
 
@@ -458,6 +494,30 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
         await progress.delete()
     except Exception:
         pass
+
+    # 🆕 Offer post-generation options: regenerate image with AI, upload custom, or done
+    try:
+        user_id = message.from_user.id if hasattr(message, "from_user") else None
+        if user_id and not video_path:  # Only for image posts (video has its own flow)
+            # Save news data for potential regeneration
+            POST_HISTORY[user_id] = {
+                "news": news,
+                "cfg_template": dict(news),  # snapshot
+            }
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎨 صورة AI جديدة", callback_data=f"regen_ai_{user_id}"),
+                InlineKeyboardButton("📸 سأرفع صورة/فيديو", callback_data=f"regen_upload_{user_id}"),
+            ], [
+                InlineKeyboardButton("✅ تمام، خلاص", callback_data=f"regen_done_{user_id}"),
+            ]])
+            await message.reply_text(
+                "هل تريد تجربة صورة مختلفة لهذا المنشور؟",
+                reply_markup=kb
+            )
+    except Exception as e:
+        logger.warning(f"Failed to offer regen options: {e}")
+
+    # 🧹 ALWAYS cleanup temporary files - never keep cached images
     for p in [img_path, out_path]:
         try: os.unlink(p)
         except: pass
@@ -671,6 +731,96 @@ async def handle_dialect_choice(update, ctx):
     except Exception as e:
         logger.error(f"Dialect dispatch failed: {e}\n{traceback.format_exc()}")
         await ctx.bot.send_message(chat_id, f"❌ فشل: {str(e)[:200]}")
+
+
+
+async def handle_regen_callback(update, ctx):
+    """Handle regeneration options after a post is sent."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
+
+    try:
+        if data.startswith("regen_done_"):
+            try:
+                await query.message.delete()
+            except: pass
+            POST_HISTORY.pop(user_id, None)
+            return
+
+        elif data.startswith("regen_upload_"):
+            # Ask user to upload a custom image/video
+            PENDING_NEWS[user_id] = {
+                "kind": "awaiting_custom_media",
+                "news": POST_HISTORY.get(user_id, {}).get("news"),
+                "chat_id": query.message.chat_id,
+                "user_id": user_id,
+            }
+            try:
+                await query.edit_message_text(
+                    "📸 *تمام، ارفع الآن:*\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "🖼️ صورة (PNG/JPG)\n"
+                    "🎬 فيديو (MP4/MOV) - حتى 3 دقائق\n"
+                    "━━━━━━━━━━━━━━━━━━\n\n"
+                    "⏳ بانتظار محتواك...\n"
+                    "لإلغاء: /cancel",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+            return
+
+        elif data.startswith("regen_ai_"):
+            # Regenerate the image using AI based on the news content
+            history = POST_HISTORY.get(user_id)
+            if not history or not history.get("news"):
+                await query.edit_message_text("⚠️ انتهت الجلسة، أرسل /post للبدء من جديد")
+                return
+
+            news = history["news"]
+            try:
+                await query.edit_message_text("🎨 جاري توليد صورة جديدة بالذكاء الاصطناعي...\n⏳ ~30 ثانية")
+            except: pass
+
+            # Generate fresh AI image
+            from news_scout import generate_ai_image
+            img_path = str(OUTPUT_DIR / f"regen_{user_id}_{os.getpid()}.jpg")
+
+            # Build a strong, clean prompt
+            ai_prompt = (
+                f"professional clean product photo, "
+                f"{news.get('image_prompt', news.get('image_query', ''))[:300]}, "
+                f"studio lighting, photorealistic, 8k, no people, no text, no logos, "
+                f"corporate announcement style"
+            )
+
+            loop = asyncio.get_event_loop()
+            got = await loop.run_in_executor(None, generate_ai_image, ai_prompt, img_path)
+
+            if not got or not os.path.exists(img_path):
+                try:
+                    await query.edit_message_text("❌ فشل توليد الصورة، حاول مرة أخرى")
+                except: pass
+                return
+
+            # Render new post with the new image
+            try:
+                await query.message.delete()
+            except: pass
+
+            new_progress = await ctx.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="🎨 جاري إعادة بناء المنشور بالصورة الجديدة..."
+            )
+            await render_with_image(query.message, news, img_path, new_progress)
+
+    except Exception as e:
+        logger.error(f"regen callback failed: {e}\n{traceback.format_exc()}")
+        try:
+            await query.edit_message_text(f"❌ فشل: {str(e)[:200]}")
+        except: pass
 
 
 async def handle_language_choice(update, ctx):
@@ -968,6 +1118,7 @@ async def handle_reverse_text(update, ctx, text):
 
 
 async def handle_photo(update, ctx):
+    cleanup_old_temp_files(user_id=update.effective_user.id)
     """Photo handler — two cases:
     1. User is uploading a custom image for pending news
     2. User sent a screenshot with caption (extract news from caption)
@@ -975,8 +1126,8 @@ async def handle_photo(update, ctx):
     user_id = update.effective_user.id
     pending = PENDING_NEWS.get(user_id)
 
-    # Case 1: User uploading custom image for pending news
-    if pending and pending.get("awaiting_image"):
+    # Case 1: User uploading custom image for pending news (either fresh or regen flow)
+    if pending and (pending.get("awaiting_image") or pending.get("kind") == "awaiting_custom_media"):
         news = pending["news"]
         progress = await update.message.reply_text(
             "📸 *تم استلام صورتك! جاري التصميم...*",
@@ -1050,6 +1201,7 @@ async def handle_photo(update, ctx):
 
 
 async def handle_video(update, ctx):
+    cleanup_old_temp_files(user_id=update.effective_user.id)
     """User uploaded a video. Two cases:
     1. They're providing custom video for pending news (extract frame)
     2. They're sending a video with caption to convert to post
@@ -1067,8 +1219,8 @@ async def handle_video(update, ctx):
     if not video and not is_video_doc:
         return  # not actually a video
 
-    # Case 1: User uploading custom video for pending news
-    if pending and pending.get("awaiting_image"):
+    # Case 1: User uploading custom video for pending news (fresh or regen)
+    if pending and (pending.get("awaiting_image") or pending.get("kind") == "awaiting_custom_media"):
         news = pending["news"]
 
         # 🎯 Validate video constraints BEFORE downloading
@@ -1294,6 +1446,7 @@ async def extract_video_frame(video_path, frame_path):
 
 async def handle_text_router(update, ctx):
     text = (update.message.text or "").strip()
+    cleanup_old_temp_files(user_id=update.effective_user.id)
     if not text:
         return
 
@@ -1329,7 +1482,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.2 (TESTED+ALL-FIXES+overlay-transparency+real-models)...")
+    logger.info("🤖 Starting 4Ever Bot v3.3 (REGEN+NSFW-FILTER+WRAP+CLEANUP+TESTED)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1343,6 +1496,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_image_choice, pattern=r"^img_(yes|no)_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_language_choice, pattern=r"^lang_(ar|en|fr)_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_dialect_choice, pattern=r"^dial_(fusha|egyptian|levantine|saudi|algerian|emirati|moroccan)_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_regen_callback, pattern=r"^regen_(ai|upload|done)_\d+$"))
 
     # 🆕 Videos & animations (GIF) → handle_video
     app.add_handler(MessageHandler(

@@ -332,6 +332,47 @@ def generate_ai_image(prompt, save_path):
         return False
 
 
+
+# 🚫 Domains we NEVER accept images from (NSFW, junk, off-topic)
+BLOCKED_DOMAINS = {
+    # NSFW
+    "xcafe.com", "xcafe.tv", "xhamster.com", "pornhub.com", "redtube.com",
+    "xnxx.com", "xvideos.com", "youporn.com", "rule34.xxx", "rule34.us",
+    "e-hentai.org", "nhentai.net", "danbooru.donmai.us", "gelbooru.com",
+    "spankbang.com", "tnaflix.com", "tube8.com", "porn.com", "sex.com",
+    # Adult image hosts
+    "imhentai.xxx", "imhentai.net", "hentaiera.com", "myhentaicomics.com",
+    # Generic junk
+    "clipart-library.com", "depositphotos.com", "shutterstock.com",
+    "istockphoto.com", "alamy.com", "dreamstime.com", "123rf.com",
+    "vectorstock.com", "freepik.com", "stockphoto.com", "gettyimages.com",
+    # Memes/generic clipart
+    "flyclipart.com", "pngwing.com", "pngegg.com", "cleanpng.com",
+    "freepngs.com", "nicepng.com", "seeklogo.com",
+    # Social media (low quality / unrelated)
+    "pinimg.com",  # Pinterest - too many off-topic results
+}
+
+def _is_blocked_url(url):
+    """Check if URL is from a blocked domain (NSFW or junk)."""
+    if not url:
+        return True
+    url_lower = url.lower()
+    # Check NSFW patterns in URL itself
+    nsfw_patterns = [
+        "porn", "xxx", "sex", "nude", "naked", "hentai", "ecchi",
+        "nsfw", "adult", "fuck", "cock", "pussy", "milf", "anal",
+    ]
+    for p in nsfw_patterns:
+        if p in url_lower:
+            return True
+    # Check blocked domains
+    for domain in BLOCKED_DOMAINS:
+        if domain in url_lower:
+            return True
+    return False
+
+
 def search_images_via_bing(query, max_results=8):
     try:
         url = f"https://www.bing.com/images/search?q={quote(query)}&form=HDRSC2&first=1"
@@ -354,7 +395,7 @@ def search_images_via_bing(query, max_results=8):
 def search_images_via_duckduckgo(query, max_results=8):
     try:
         r = requests.get(f"https://duckduckgo.com/?q={quote(query)}&iax=images&ia=images",
-                         headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
         m = re.search(r'vqd=([\d-]+)', r.text)
         if not m:
             return []
@@ -362,7 +403,7 @@ def search_images_via_duckduckgo(query, max_results=8):
         r2 = requests.get(
             f"https://duckduckgo.com/i.js?l=us-en&o=json&q={quote(query)}&vqd={vqd}&f=,,,,,&p=1",
             headers={"User-Agent": "Mozilla/5.0", "Referer": "https://duckduckgo.com/"},
-            timeout=15)
+            timeout=6)
         data = r2.json()
         urls = [r.get("image") for r in data.get("results", [])[:max_results] if r.get("image")]
         log.info(f"   DuckDuckGo: {len(urls)}")
@@ -383,6 +424,9 @@ def find_or_generate_image(news_data, save_path):
             urls = search_images_via_duckduckgo(query)
 
         for i, url in enumerate(urls[:5]):
+            if _is_blocked_url(url):
+                log.info(f"   🚫 BLOCKED domain/NSFW: {url[:80]}")
+                continue
             log.info(f"   🔗 Try {i+1}: {url[:80]}")
             if try_download_image(url, save_path):
                 return True
@@ -1149,7 +1193,10 @@ def acquire_validated_image(news_data, save_path, max_attempts=7):
                 "leak": "tech device leaked render mysterious dark",
                 "emerging": "futuristic technology concept neon glowing",
             }
-            ai_prompt = f"{news_data.get('image_prompt', '')} {category_hints.get(category, 'high quality professional tech product photo')}"
+            # Always use a SAFE, specific prompt for AI generation
+            base = news_data.get('image_prompt', '') or news_data.get('image_query', '')
+            cat_hint = category_hints.get(category, 'professional technology product photo')
+            ai_prompt = f"professional clean product photo, {base}, {cat_hint}, studio lighting, photorealistic, 8k, no people, no text"
             got = generate_ai_image(ai_prompt, save_path)
 
         if not got:
@@ -1170,8 +1217,17 @@ def acquire_validated_image(news_data, save_path, max_attempts=7):
             return True
         log.warning(f"   ❌ AI validator REJECTED: {reason[:150]}")
 
-    log.warning("   Using last attempted image despite validation issues")
-    return has_any_image and os.path.exists(save_path)
+    # All validation failed - generate ONE last clean AI image as safe fallback
+    log.warning("   ⚠️ All validation failed, generating clean fallback AI image")
+    safe_prompt = (f"professional clean technology product photo, "
+                   f"{news_data.get('image_query', '')[:200]}, "
+                   f"studio lighting, photorealistic, no people, no text, no logos, "
+                   f"corporate announcement style, 8k quality")
+    if generate_ai_image(safe_prompt, save_path):
+        log.info("   ✅ Generated safe fallback AI image")
+        return True
+    log.error("   ❌ Even fallback AI generation failed")
+    return False
 
 
 def search_images_via_google_images(query):
@@ -1254,6 +1310,9 @@ def find_or_generate_image_search_only(news_data, save_path):
 
     # Try each URL
     for i, url in enumerate(unique_urls[:12]):  # Try up to 12 candidates
+        if _is_blocked_url(url):
+            log.info(f"   🚫 BLOCKED domain/NSFW: {url[:80]}")
+            continue
         log.info(f"   🔗 Try {i+1}/{min(12, len(unique_urls))}: {url[:80]}")
         if try_download_image(url, save_path):
             # Quick visual check

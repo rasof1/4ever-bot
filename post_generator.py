@@ -374,6 +374,39 @@ def draw_live_badge(canvas, gx, gy, tw, th, text):
 
 
 # ─── Headline ───────────────────────────────────────────────────
+
+def wrap_text_to_width(draw, text, font, max_width, is_ar=True):
+    """Split text into multiple lines that each fit within max_width.
+    Returns list of lines (strings). Works for both AR and EN/FR.
+    """
+    if not text:
+        return [""]
+    words = text.split()
+    if len(words) <= 1:
+        return [text]
+    lines = []
+    current = []
+    for word in words:
+        test = " ".join(current + [word])
+        if is_ar:
+            bb = draw.textbbox((0, 0), test, font=font, language="ar", direction="rtl")
+        else:
+            bb = draw.textbbox((0, 0), test, font=font)
+        if bb[2] - bb[0] <= max_width:
+            current.append(word)
+        else:
+            if current:
+                lines.append(" ".join(current))
+                current = [word]
+            else:
+                # Single word too long → keep it anyway
+                lines.append(word)
+                current = []
+    if current:
+        lines.append(" ".join(current))
+    return lines if lines else [text]
+
+
 def fit_text_to_width(draw, text, max_width, max_font_size, min_font_size=24, font_name="Cairo.ttf", is_ar=True):
     """Find largest font size that fits text within max_width."""
     for size in range(max_font_size, min_font_size - 1, -2):
@@ -403,18 +436,37 @@ def draw_headline(canvas, gy, th, headline):
 
     base_size = headline.get("font_size", 44)
 
-    # Auto-fit line 1
+    # 🎯 Auto-fit + wrap line 1 (multi-line support)
+    # First try fitting at base size, then progressively smaller
     font1, size1 = fit_text_to_width(draw, line1, max_text_width, base_size,
-                                      min_font_size=20, font_name=font_name, is_ar=is_rtl)
-    if is_rtl:
-        bb1 = measure_ar(draw, line1, font1)
-    else:
-        bb1 = draw.textbbox((0, 0), line1, font=font1)
-    w1, h1 = bb1[2] - bb1[0], bb1[3] - bb1[1]
-    fy = gy + th + 50
-    x1 = (W - w1) // 2
-    draw_text_shadow(draw, (x1, fy), line1, font1, (255, 255, 255, 255), is_ar=is_rtl)
+                                      min_font_size=28, font_name=font_name, is_ar=is_rtl)
 
+    # Now wrap (in case text is still too wide at minimum size)
+    wrapped_lines = wrap_text_to_width(draw, line1, font1, max_text_width, is_ar=is_rtl)
+
+    # If wrapping produced > 2 lines, reduce font and try again
+    if len(wrapped_lines) > 2:
+        for sz in range(size1 - 2, 20, -2):
+            ft = load_font(font_name, sz)
+            test_lines = wrap_text_to_width(draw, line1, ft, max_text_width, is_ar=is_rtl)
+            if len(test_lines) <= 2:
+                font1, size1, wrapped_lines = ft, sz, test_lines
+                break
+
+    fy = gy + th + 50
+    line_h = 0
+    for i, wline in enumerate(wrapped_lines):
+        if is_rtl:
+            bbw = measure_ar(draw, wline, font1)
+        else:
+            bbw = draw.textbbox((0, 0), wline, font=font1)
+        ww, lh = bbw[2] - bbw[0], bbw[3] - bbw[1]
+        line_h = lh
+        xw = (W - ww) // 2
+        yw = fy + i * int(lh * 1.25)
+        draw_text_shadow(draw, (xw, yw), wline, font1, (255, 255, 255, 255), is_ar=is_rtl)
+
+    h1 = int(line_h * 1.25 * len(wrapped_lines)) if len(wrapped_lines) > 1 else line_h
     line2_y = fy + h1 + 32
     if line2_ar:
         if line2_en and is_rtl:
