@@ -188,7 +188,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.4 (إصلاح user_id الصحيح + فيديو أسرع 2x بـ 720p)"
+        "• الإصدار: 3.5 (روابط تعمل 100% + Gemini grounding + og:image تلقائياً)"
     )
     await update.message.reply_text(msg)
 
@@ -539,7 +539,9 @@ async def render_with_image(message, news, img_path, progress, video_path=None, 
 
 
 async def render_and_send_post(message, news, idx, total, progress):
-    """Full pipeline: auto-acquire validated image + render + send."""
+    """Full pipeline: auto-acquire validated image + render + send.
+    If news has _og_image_url (from URL fetch), try that first.
+    """
     loop = asyncio.get_event_loop()
     await progress.edit_text(f"🔄 ({idx}/{total}) - جاري البحث عن صورة مناسبة...")
 
@@ -547,12 +549,33 @@ async def render_and_send_post(message, news, idx, total, progress):
                                      dir=str(OUTPUT_DIR)) as tmp:
         img_path = tmp.name
 
-    try:
-        await loop.run_in_executor(None, acquire_validated_image, news, img_path, 3)
-        if not os.path.exists(img_path) or os.path.getsize(img_path) < 1000:
-            raise ValueError("No valid image acquired")
-    except Exception as e:
-        logger.warning(f"Image acquisition failed: {e}, using placeholder")
+    image_acquired = False
+
+    # 🆕 Try og:image first if available (from URL fetch)
+    og_url = news.get("_og_image_url")
+    if og_url:
+        try:
+            logger.info(f"   📷 Trying og:image first: {og_url[:80]}")
+            def _dl():
+                from news_scout import try_download_image, _is_image_visually_meaningful
+                if try_download_image(og_url, img_path):
+                    if _is_image_visually_meaningful(img_path):
+                        return True
+                return False
+            if await loop.run_in_executor(None, _dl):
+                logger.info(f"   ✅ Using og:image directly!")
+                image_acquired = True
+        except Exception as e:
+            logger.warning(f"   og:image download failed: {e}")
+
+    if not image_acquired:
+        try:
+            await loop.run_in_executor(None, acquire_validated_image, news, img_path, 3)
+            if not os.path.exists(img_path) or os.path.getsize(img_path) < 1000:
+                raise ValueError("No valid image acquired")
+            image_acquired = True
+        except Exception as e:
+            logger.warning(f"Image acquisition failed: {e}, using placeholder")
         from PIL import Image, ImageDraw, ImageFilter
         img = Image.new("RGB", (1280, 720), (15, 15, 35))
         d = ImageDraw.Draw(img)
@@ -918,32 +941,48 @@ async def generate_and_send_one_with_lang(message, user_id, idx, total, lang, ct
 
 
 async def execute_reverse_url(message, user_id, url, full_text, lang, ctx, dialect=None):
-    """Execute reverse URL with a chosen language. message=bot's progress message, user_id=original user."""
+    """Execute reverse URL: fetch content + extract image + reverse_scout + ask about image.
+    message=bot's progress message, user_id=original user.
+    """
     progress = await message.reply_text("📥 جاري قراءة الرابط...")
     chat_id = message.chat_id
     try:
         loop = asyncio.get_event_loop()
-        content_data = await loop.run_in_executor(None, fetch_url_content, url)
-        if content_data.get("error"):
-            await progress.edit_text(f"❌ فشلت قراءة الرابط: {content_data['error']}")
+        # fetch_url_content now returns (text, image_url) tuple when return_image=True
+        text_content, og_image_url = await loop.run_in_executor(
+            None, lambda: fetch_url_content(url, return_image=True)
+        )
+
+        if not text_content or len(text_content) < 100:
+            await progress.edit_text(
+                "❌ تعذر استخراج محتوى من الرابط.\n\n"
+                "حاول:\n"
+                "• إرسال الرابط مع وصف مختصر للمنشور\n"
+                "• أو لقطة شاشة للمنشور"
+            )
             return
 
         user_extras = full_text.replace(url, "").strip()
-        combined_parts = [f"URL: {url}"]
-        if content_data.get("title"): combined_parts.append(f"Title: {content_data['title']}")
-        if content_data.get("description"): combined_parts.append(f"Description: {content_data['description']}")
-        if content_data.get("body_text"): combined_parts.append(f"Article body: {content_data['body_text']}")
-        if user_extras: combined_parts.append(f"User context: {user_extras}")
-        combined = "\n".join(combined_parts)
+        combined = f"URL: {url}\n\nContent:\n{text_content}"
+        if user_extras:
+            combined += f"\n\nUser context: {user_extras}"
 
         await progress.edit_text(
-            f"✅ قرأت المقال: {content_data.get('title','بدون عنوان')[:50]}\n"
+            f"✅ قرأت المحتوى ({len(text_content)} حرف)\n"
             f"🤖 جاري إعادة الصياغة..."
         )
 
-        news = await loop.run_in_executor(None, reverse_scout, combined, lang)
+        news = await loop.run_in_executor(
+            None, lambda: reverse_scout(combined, lang=lang, dialect=dialect)
+        )
         news["source_url"] = url
-        # ✅ Pass explicit user_id + chat_id (since message.from_user.id is the bot)
+
+        # 🆕 If we found an og:image, try to use it as the main asset
+        if og_image_url:
+            news["_og_image_url"] = og_image_url
+            logger.info(f"   📷 og:image will be used: {og_image_url[:80]}")
+
+        # Ask user if they have their own image, or use ours / AI
         await ask_about_image(message, ctx, news, progress, user_id=user_id, chat_id=chat_id)
     except Exception as e:
         logger.error(f"Reverse URL failed: {e}\n{traceback.format_exc()}")
@@ -1479,7 +1518,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.4 (FIXED-REGEN-STATE+FAST-VIDEO-720p+EXPLICIT-USER-ID)...")
+    logger.info("🤖 Starting 4Ever Bot v3.5 (URL-EXTRACTION-WORKS+OG-IMAGE+GEMINI-GROUNDING)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
