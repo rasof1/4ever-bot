@@ -152,7 +152,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.1 (12 موديل + Validator صارم + فيديو بدون أسود + برومبت نظيف)"
+        "• الإصدار: 3.2 (مختبر بالكامل - شفافية overlay + موديلات حقيقية + AI validator دائم)"
     )
     await update.message.reply_text(msg)
 
@@ -1329,7 +1329,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.1 (12-models+strict-validator+exact-video-aspect+clean-prompts)...")
+    logger.info("🤖 Starting 4Ever Bot v3.2 (TESTED+ALL-FIXES+overlay-transparency+real-models)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))

@@ -16,26 +16,31 @@ if not GEMINI_API_KEY:
 
 # Fallback chain - each model has SEPARATE daily quota in Gemini Free Tier
 FALLBACK_MODELS = [
-    # Tier 1: Best quality (try these first)
-    "gemini-2.5-pro",                  # Pro - best for complex reasoning (low quota)
-    "gemini-2.5-flash",                # Flash 2.5 - great balance
-    "gemini-2.5-flash-lite",           # Lite 2.5 - separate quota
-    # Tier 2: 2.0 family (good quality, separate quotas)
-    "gemini-2.0-flash",                # Flash 2.0
-    "gemini-2.0-flash-lite",           # Lite 2.0
-    "gemini-2.0-flash-001",            # Stable 2.0
-    # Tier 3: Latest aliases (always-available endpoints)
-    "gemini-flash-latest",             # Latest flash
-    "gemini-flash-lite-latest",        # Latest flash-lite
-    # Tier 4: Legacy 1.5 family (last resort, high quotas)
-    "gemini-1.5-flash",                # Stable 1.5
-    "gemini-1.5-flash-8b",             # 8B variant (high quota)
-    "gemini-1.5-flash-latest",         # Latest 1.5
-    "gemini-1.5-pro",                  # Pro 1.5 (highest context)
+    # Tier 1: Newest 3.x family (best, separate quotas each)
+    "gemini-3.5-flash",                # newest flash 3.5
+    "gemini-3-flash-preview",          # 3.x flash preview
+    "gemini-3.1-pro-preview",          # 3.1 pro
+    "gemini-3-pro-preview",            # 3 pro
+    "gemini-3.1-flash-lite",           # 3.1 flash lite (high quota)
+    # Tier 2: 2.5 family
+    "gemini-2.5-flash",                # Flash 2.5 - very reliable
+    "gemini-2.5-pro",                  # Pro 2.5
+    "gemini-2.5-flash-lite",           # Lite 2.5
+    # Tier 3: 2.0 family
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-lite-001",
+    # Tier 4: Always-available "latest" aliases (good fallback)
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-pro-latest",
 ]
 _env_model = os.getenv("GEMINI_MODEL")
 if _env_model:
     FALLBACK_MODELS = [_env_model] + [m for m in FALLBACK_MODELS if m != _env_model]
+
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # Language config
 DIALECTS = {
@@ -430,7 +435,7 @@ def _call_gemini(prompt, body_overrides=None):
 
     last_err = None
     for idx, model in enumerate(FALLBACK_MODELS):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        url = f"{GEMINI_API_BASE}/{model}:generateContent?key={GEMINI_API_KEY}"
         try:
             log.info(f"🤖 Model {idx+1}/{len(FALLBACK_MODELS)}: {model}")
             r = requests.post(url, json=body, timeout=90)
@@ -1157,19 +1162,13 @@ def acquire_validated_image(news_data, save_path, max_attempts=7):
 
         has_any_image = True
 
-        # For AI-generated images (attempts 5-6), still validate
-        # For search results (attempts 0-4), the search itself plus visual check is usually enough
-        if attempt >= 5:
-            # AI-generated → validate with vision
-            is_valid, issues, reason = validate_post_with_ai(news_data, save_path)
-            if is_valid:
-                log.info(f"   ✅ AI image accepted on attempt {attempt+1}")
-                return True
-            log.warning(f"   AI image rejected: {reason}")
-        else:
-            # Search result that passed visual check → accept directly (trust the search)
-            log.info(f"   ✅ Real photo from search accepted on attempt {attempt+1}")
+        # 🎯 ALWAYS validate with AI Vision - search results lie often!
+        # E.g. searching "NVIDIA Vera Rubin" returns BICYCLES named "Rubin" - we MUST reject those
+        is_valid, issues, reason = validate_post_with_ai(news_data, save_path)
+        if is_valid:
+            log.info(f"   ✅ Image VALIDATED on attempt {attempt+1}: {reason[:100]}")
             return True
+        log.warning(f"   ❌ AI validator REJECTED: {reason[:150]}")
 
     log.warning("   Using last attempted image despite validation issues")
     return has_any_image and os.path.exists(save_path)

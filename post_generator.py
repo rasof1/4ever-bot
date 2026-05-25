@@ -309,9 +309,12 @@ def draw_source_logo(canvas, gx, gy, src):
 
 # ─── Trend arrow ────────────────────────────────────────────────
 def draw_trend_arrow(canvas, gx, gy, tw, color):
+    """Draw the trend arrow. Preserves canvas mode (RGB or RGBA)."""
     W, H = canvas.size
     sz = 56; ax = gx + tw - sz - 22; ay = gy + 22
     rgb = hex_to_rgb(color)
+    is_rgba = (canvas.mode == "RGBA")
+
     glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
     cx, cy = ax + sz // 2, ay + sz // 2
@@ -319,9 +322,16 @@ def draw_trend_arrow(canvas, gx, gy, tw, color):
         a = int(90 * (1 - (r - sz // 2) / 38))
         gd.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(*rgb, a))
     glow = glow.filter(ImageFilter.GaussianBlur(10))
-    c = canvas.convert("RGBA")
-    c.alpha_composite(glow)
-    out = c.convert("RGB")
+
+    if is_rgba:
+        # Keep RGBA mode (for video overlay transparency)
+        out = canvas.copy()
+        out.alpha_composite(glow)
+    else:
+        c = canvas.convert("RGBA")
+        c.alpha_composite(glow)
+        out = c.convert("RGB")
+
     d = ImageDraw.Draw(out, "RGBA")
     d.ellipse((ax, ay, ax + sz, ay + sz), fill=(*rgb, 255))
     cx, cy = ax + sz // 2, ay + sz // 2
