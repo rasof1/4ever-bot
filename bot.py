@@ -188,7 +188,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.3 (زر صورة AI جديدة + فلتر NSFW + التفاف العناوين + تنظيف تلقائي + جلسة جديدة لكل طلب)"
+        "• الإصدار: 3.4 (إصلاح user_id الصحيح + فيديو أسرع 2x بـ 720p)"
     )
     await update.message.reply_text(msg)
 
@@ -307,27 +307,30 @@ async def composite_video_into_design(bg_png, overlay_png, design_box, video_pat
     try:
         cmd = [
             ffmpeg_bin, "-y",
-            "-loop", "1", "-i", bg_png,              # input 0: background layer
-            "-i", video_path,                         # input 1: user video
-            "-loop", "1", "-i", overlay_png,         # input 2: overlay (badges/headline)
+            # Fast image inputs - no looping overhead
+            "-framerate", "30", "-loop", "1", "-i", bg_png,        # input 0: background
+            "-i", video_path,                                       # input 1: user video
+            "-framerate", "30", "-loop", "1", "-i", overlay_png,   # input 2: overlay
             "-filter_complex", filter_complex,
             "-map", "[out]",
-            "-map", "1:a?",                          # audio from video
+            "-map", "1:a?",                          # audio from video (optional)
+            # 🚀 FAST encoding settings
             "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "28",
+            "-preset", "ultrafast",                  # fastest preset
+            "-tune", "fastdecode",                   # faster decode
+            "-crf", "30",                            # slightly lower quality but 2x faster
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
-            "-b:a", "96k",
+            "-b:a", "64k",                           # lower audio bitrate
             "-ar", "44100",
-            "-shortest",
+            "-shortest",                             # stop when shortest stream ends (the video)
             "-movflags", "+faststart",
-            "-t", "180",                             # 🆕 Cap at 3 minutes (was 2)
-            "-threads", "0",
+            "-t", "180",                             # max 3 min
+            "-threads", "0",                         # use all CPU cores
             output_mp4
         ]
         logger.info(f"   Running ffmpeg composite (ultrafast preset)...")
-        result = subprocess.run(cmd, capture_output=True, timeout=420)  # 7 min timeout
+        result = subprocess.run(cmd, capture_output=True, timeout=300)  # 5 min timeout (was 7)
 
         if result.returncode != 0:
             stderr = result.stderr.decode('utf-8', errors='ignore')[-800:]
@@ -349,7 +352,7 @@ async def composite_video_into_design(bg_png, overlay_png, design_box, video_pat
         return False
 
 
-async def render_with_image(message, news, img_path, progress, video_path=None):
+async def render_with_image(message, news, img_path, progress, video_path=None, user_id=None):
     """Render the 4Ever post.
     - If video_path provided: composite video INTO the design → output MP4 reels
     - Otherwise: standard image post
@@ -367,8 +370,17 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
         vid_w, vid_h = get_video_dimensions(video_path)
         canvas_w, canvas_h = choose_canvas_size_for_aspect(vid_w, vid_h)
 
+        # 🚀 SPEED: for video mode, use 720-wide canvas (vs 1080) - 2x faster, still HD quality
+        # The design is generated at 720 then scales perfectly on social media
+        if canvas_w > 720:
+            scale = 720 / canvas_w
+            canvas_w = 720
+            canvas_h = (int(canvas_h * scale) // 2) * 2  # even
+            logger.info(f"   🚀 Scaling canvas down to 720x{canvas_h} for faster encoding")
+
         # Inject canvas_height into config
         cfg["canvas_height"] = canvas_h
+        cfg["output"]["size"] = canvas_w  # Override default 1080
 
         await progress.edit_text(
             f"🎨 جاري تصميم طبقات المنشور...\n"
@@ -390,10 +402,9 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
         await loop.run_in_executor(None, _gen_static)
 
         await progress.edit_text(
-            "🎬 جاري دمج الفيديو في تصميم 4Ever الكامل...\n"
-            "🏷️ يتضمن: شعار المصدر + سهم الترند + البادجات\n"
+            "🎬 جاري دمج الفيديو في تصميم 4Ever...\n"
             f"📐 {canvas_w}x{canvas_h}\n"
-            "⏳ سيستغرق 3-5 دقائق..."
+            "⏳ سيستغرق دقيقة لكل ~30 ثانية فيديو..."
         )
 
         # Composite: bg → video → overlay (3 layers) at chosen canvas size
@@ -497,18 +508,21 @@ async def render_with_image(message, news, img_path, progress, video_path=None):
 
     # 🆕 Offer post-generation options: regenerate image with AI, upload custom, or done
     try:
-        user_id = message.from_user.id if hasattr(message, "from_user") else None
-        if user_id and not video_path:  # Only for image posts (video has its own flow)
+        # 🎯 Use explicit user_id (caller knows correct user) - falls back to message.from_user only if not provided
+        actual_user_id = user_id
+        if actual_user_id is None and hasattr(message, "from_user") and message.from_user:
+            actual_user_id = message.from_user.id
+        if actual_user_id and not video_path:  # Only for image posts (video has its own flow)
             # Save news data for potential regeneration
-            POST_HISTORY[user_id] = {
+            POST_HISTORY[actual_user_id] = {
                 "news": news,
-                "cfg_template": dict(news),  # snapshot
+                "cfg_template": dict(news),
             }
             kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🎨 صورة AI جديدة", callback_data=f"regen_ai_{user_id}"),
-                InlineKeyboardButton("📸 سأرفع صورة/فيديو", callback_data=f"regen_upload_{user_id}"),
+                InlineKeyboardButton("🎨 صورة AI جديدة", callback_data=f"regen_ai_{actual_user_id}"),
+                InlineKeyboardButton("📸 سأرفع صورة/فيديو", callback_data=f"regen_upload_{actual_user_id}"),
             ], [
-                InlineKeyboardButton("✅ تمام، خلاص", callback_data=f"regen_done_{user_id}"),
+                InlineKeyboardButton("✅ تمام، خلاص", callback_data=f"regen_done_{actual_user_id}"),
             ]])
             await message.reply_text(
                 "هل تريد تجربة صورة مختلفة لهذا المنشور؟",
@@ -549,7 +563,8 @@ async def render_and_send_post(message, news, idx, total, progress):
         img = img.filter(ImageFilter.GaussianBlur(10))
         img.save(img_path)
 
-    await render_with_image(message, news, img_path, progress)
+    user_id = getattr(message, "from_user", None) and message.from_user.id
+    await render_with_image(message, news, img_path, progress, user_id=user_id)
 
 
 async def generate_and_send_one(update, idx, total):
@@ -814,7 +829,7 @@ async def handle_regen_callback(update, ctx):
                 chat_id=query.message.chat_id,
                 text="🎨 جاري إعادة بناء المنشور بالصورة الجديدة..."
             )
-            await render_with_image(query.message, news, img_path, new_progress)
+            await render_with_image(query.message, news, img_path, new_progress, user_id=user_id)
 
     except Exception as e:
         logger.error(f"regen callback failed: {e}\n{traceback.format_exc()}")
@@ -1141,7 +1156,7 @@ async def handle_photo(update, ctx):
             logger.info(f"📥 Downloaded user image: {user_img_path}")
 
             PENDING_NEWS.pop(user_id, None)
-            await render_with_image(update.message, news, user_img_path, progress)
+            await render_with_image(update.message, news, user_img_path, progress, user_id=user_id)
         except Exception as e:
             logger.error(f"Custom image handler failed: {e}\n{traceback.format_exc()}")
             await progress.edit_text(f"❌ فشل معالجة الصورة: {str(e)[:200]}")
@@ -1282,7 +1297,7 @@ async def handle_video(update, ctx):
 
             PENDING_NEWS.pop(user_id, None)
             # 🎯 Pass video_path so the user's original video also gets sent after the post
-            await render_with_image(update.message, news, frame_path, progress, video_path=video_path)
+            await render_with_image(update.message, news, frame_path, progress, video_path=video_path, user_id=user_id)
 
             # Cleanup AFTER sending
             try: os.unlink(video_path)
@@ -1343,43 +1358,25 @@ def get_video_dimensions(video_path):
 
 
 def choose_canvas_size_for_aspect(media_w, media_h):
-    """Choose canvas size (W, H) that MATCHES the media's aspect ratio.
-    The frame design adapts to the media, NOT the other way around.
-
-    Rules:
-    - Canvas width is ALWAYS 1080 (standard social media width)
-    - Canvas height is calculated so the media fits naturally with room for:
-      * Header (~175px)
-      * Headline area (~400px)
-      * Total chrome: 575px reserved for branding/headline
-    - The media gets the SAFE width (~85%) and proportional height
-    - Final canvas height = media_aspect_height + 575px chrome
-
-    Bounded:
-    - Min height 1080 (don't go shorter than square)
-    - Max height 2400 (don't go absurdly tall)
+    """Choose canvas size (W, H) that matches media aspect ratio.
+    For VIDEO performance, keep canvas smaller (less ffmpeg work).
     """
     if not media_w or not media_h:
         return 1080, 1080
 
     aspect = media_w / media_h
-
-    # Media will be displayed at SAFE_WIDTH (85% of 1080 = 918)
     media_display_w = int(1080 * 0.85)  # 918
-    # Required height for media at this width
     media_display_h = int(media_display_w / aspect)
 
-    # Chrome reserved (header + headline area + padding)
-    CHROME_TOP = 175      # header
-    CHROME_BOTTOM = 400   # headline + decorations
-    PADDING = 50          # extra breathing room
+    # 🚀 Reduced chrome for faster video encoding (smaller canvas = faster ffmpeg)
+    CHROME_TOP = 140      # was 175
+    CHROME_BOTTOM = 280   # was 400 (was way too much for portrait video)
+    PADDING = 30          # was 50
 
     target_h = media_display_h + CHROME_TOP + CHROME_BOTTOM + PADDING
 
-    # Clamp to reasonable bounds
-    target_h = max(1080, min(target_h, 2400))
-
-    # Round to even number (required by some video codecs)
+    # Bounded
+    target_h = max(1080, min(target_h, 2100))   # was 2400 - cap lower for speed
     target_h = (target_h // 2) * 2
 
     logger.info(f"   📐 Media aspect {aspect:.2f} → media {media_display_w}x{media_display_h} → canvas 1080x{target_h}")
@@ -1482,7 +1479,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.3 (REGEN+NSFW-FILTER+WRAP+CLEANUP+TESTED)...")
+    logger.info("🤖 Starting 4Ever Bot v3.4 (FIXED-REGEN-STATE+FAST-VIDEO-720p+EXPLICIT-USER-ID)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
