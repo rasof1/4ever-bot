@@ -18,20 +18,54 @@ if not GEMINI_API_KEY:
 # Primary from env, backups hardcoded as fallback
 _BACKUP_KEYS = ["AIzaSyAE20l5g5dVJyijeLno6VYXHBqMr73Bmt8"]
 GEMINI_API_KEYS = [GEMINI_API_KEY] + [k for k in _BACKUP_KEYS if k and k != GEMINI_API_KEY]
-_KEY_FAILURES = {k: 0 for k in GEMINI_API_KEYS}  # tracks consecutive failures per key
-_KEY_INDEX = [0]  # mutable so functions can rotate
+_DEAD_KEYS = set()   # permanently bad keys (403 leaked/blocked) - skipped forever
+_KEY_INDEX = [0]     # mutable so functions can rotate
 
 def get_current_key():
-    """Get the current active Gemini API key (with rotation on rate limit)."""
-    return GEMINI_API_KEYS[_KEY_INDEX[0] % len(GEMINI_API_KEYS)]
+    """Get the current active Gemini API key (skipping dead ones)."""
+    # If all keys are dead, fall back to first one anyway (last resort)
+    if len(_DEAD_KEYS) >= len(GEMINI_API_KEYS):
+        return GEMINI_API_KEYS[0]
+    # Find next non-dead key starting from current index
+    n = len(GEMINI_API_KEYS)
+    for offset in range(n):
+        idx = (_KEY_INDEX[0] + offset) % n
+        if GEMINI_API_KEYS[idx] not in _DEAD_KEYS:
+            _KEY_INDEX[0] = idx
+            return GEMINI_API_KEYS[idx]
+    return GEMINI_API_KEYS[0]
 
 def rotate_key():
-    """Rotate to the next API key. Called when a key hits rate limit."""
+    """Move to the next key in the pool (skips dead keys)."""
+    import logging
+    log = logging.getLogger("4ever_bot")
+    n = len(GEMINI_API_KEYS)
+    if n <= 1:
+        return
     old_idx = _KEY_INDEX[0]
-    _KEY_INDEX[0] = (_KEY_INDEX[0] + 1) % len(GEMINI_API_KEYS)
-    if len(GEMINI_API_KEYS) > 1:
-        import logging
-        logging.getLogger("4ever_bot").info(f"🔑 Rotating API key {old_idx} → {_KEY_INDEX[0]}")
+    # Try each subsequent key, skipping dead ones
+    for offset in range(1, n + 1):
+        idx = (old_idx + offset) % n
+        if GEMINI_API_KEYS[idx] not in _DEAD_KEYS:
+            _KEY_INDEX[0] = idx
+            log.info(f"🔑 Rotated key {old_idx} → {idx} (live keys: {n - len(_DEAD_KEYS)}/{n})")
+            return
+    log.warning(f"⚠️ All {n} keys are marked dead, staying on key {old_idx}")
+
+def mark_key_dead(reason="unknown"):
+    """Mark the CURRENT key as permanently bad (leaked/blocked).
+    Will be skipped on all future requests in this session.
+    """
+    import logging
+    log = logging.getLogger("4ever_bot")
+    key = GEMINI_API_KEYS[_KEY_INDEX[0]]
+    if key in _DEAD_KEYS:
+        return
+    _DEAD_KEYS.add(key)
+    live_count = len(GEMINI_API_KEYS) - len(_DEAD_KEYS)
+    log.warning(f"💀 Key {_KEY_INDEX[0]} (...{key[-6:]}) marked DEAD ({reason}). Live keys: {live_count}/{len(GEMINI_API_KEYS)}")
+    # Rotate to a live key
+    rotate_key()
 
 
 def _gemini_request(model, body, timeout=45):
@@ -47,10 +81,18 @@ def _gemini_request(model, body, timeout=45):
             r = requests.post(url, json=body, timeout=timeout)
         except Exception:
             return None
-        # Rate-limit or quota → rotate key + retry once
-        if r.status_code in (429, 403):
-            log.warning(f"   🔄 Key {_KEY_INDEX[0]} hit {r.status_code}, rotating to next key...")
+        if r.status_code == 429:
+            log.warning(f"   🔄 Key {_KEY_INDEX[0]} hit 429, rotating to next key...")
             rotate_key()
+            continue
+        if r.status_code == 403:
+            err_msg = ""
+            try: err_msg = r.json().get("error", {}).get("message", "").lower()
+            except Exception: pass
+            if "leaked" in err_msg or "api key" in err_msg or "blocked" in err_msg:
+                mark_key_dead(reason="leaked/blocked")
+            else:
+                rotate_key()
             continue
         # Success or non-rate-limit error → return as-is
         return r
@@ -533,9 +575,19 @@ def _call_gemini(prompt, body_overrides=None):
                 time.sleep(2)
                 continue
             if r.status_code == 403:
-                log.warning(f"   ⚠️  {model} key blocked, rotating...")
-                rotate_key()
-                last_err = RuntimeError(f"{model} key blocked")
+                # Detect leaked/blocked key vs generic 403
+                err_msg = ""
+                try:
+                    err_msg = r.json().get("error", {}).get("message", "").lower()
+                except Exception:
+                    pass
+                if "leaked" in err_msg or "api key" in err_msg or "blocked" in err_msg:
+                    log.warning(f"   💀 Key {_KEY_INDEX[0]} is LEAKED/BLOCKED by Google - marking dead")
+                    mark_key_dead(reason="leaked/blocked")
+                else:
+                    log.warning(f"   ⚠️  {model} 403 (not key-related), rotating...")
+                    rotate_key()
+                last_err = RuntimeError(f"{model}: {err_msg[:80] or '403 blocked'}")
                 continue
             if r.status_code == 404:
                 log.warning(f"   ⚠️  {model} not found")
@@ -936,8 +988,17 @@ If you cannot access the URL, set is_accessible to false and explain in topic_su
         try:
             api_url = f"{GEMINI_API_BASE}/{model}:generateContent?key={get_current_key()}"
             r = requests.post(api_url, json=body, timeout=45)
-            if r.status_code in (429, 403):
+            if r.status_code == 429:
                 rotate_key()
+                continue
+            if r.status_code == 403:
+                err_msg = ""
+                try: err_msg = r.json().get("error", {}).get("message", "").lower()
+                except Exception: pass
+                if "leaked" in err_msg or "api key" in err_msg or "blocked" in err_msg:
+                    mark_key_dead(reason="leaked/blocked")
+                else:
+                    rotate_key()
                 continue
             if r.status_code != 200:
                 continue
@@ -1186,8 +1247,17 @@ def extract_post_from_screenshot(image_path):
         try:
             url = f"{GEMINI_API_BASE}/{model}:generateContent?key={get_current_key()}"
             r = requests.post(url, json=body, timeout=30)
-            if r.status_code in (429, 403):
+            if r.status_code == 429:
                 rotate_key()
+                continue
+            if r.status_code == 403:
+                err_msg = ""
+                try: err_msg = r.json().get("error", {}).get("message", "").lower()
+                except Exception: pass
+                if "leaked" in err_msg or "api key" in err_msg or "blocked" in err_msg:
+                    mark_key_dead(reason="leaked/blocked")
+                else:
+                    rotate_key()
                 continue
             if r.status_code != 200:
                 continue
