@@ -470,19 +470,52 @@ def draw_headline(canvas, gy, th, headline):
     line2_y = fy + h1 + 32
     if line2_ar:
         if line2_en and is_rtl:
-            # Arabic + English split layout (only for RTL mode)
-            combined_text = f"{line2_en}  {line2_ar}"
-            font2, size2 = fit_text_to_width(draw, combined_text, max_text_width, base_size - 4,
-                                              min_font_size=18, font_name=font_name, is_ar=True)
-            bb2 = measure_ar(draw, line2_ar, font2)
-            bb_en = draw.textbbox((0, 0), line2_en, font=font2)
-            w2, en_w = bb2[2] - bb2[0], bb_en[2] - bb_en[0]
-            gap = 18
-            x_start = (W - (w2 + gap + en_w)) // 2
-            draw_text_shadow(draw, (x_start, line2_y), line2_en, font2, hex_to_rgba(accent))
-            draw_text_shadow(draw, (x_start + en_w + gap, line2_y),
-                             line2_ar, font2, (255, 255, 255, 255), is_ar=True)
-            line_height = bb2[3] - bb2[1]
+            # 🎯 NEW: Arabic + English on SEPARATE lines, each wrapped independently
+            # First the Arabic line (white)
+            font2, size2 = fit_text_to_width(draw, line2_ar, max_text_width, base_size - 4,
+                                              min_font_size=22, font_name=font_name, is_ar=True)
+            ar_lines = wrap_text_to_width(draw, line2_ar, font2, max_text_width, is_ar=True)
+            if len(ar_lines) > 2:
+                # Shrink font and re-wrap
+                for sz in range(size2 - 2, 18, -2):
+                    ft = load_font(font_name, sz)
+                    test = wrap_text_to_width(draw, line2_ar, ft, max_text_width, is_ar=True)
+                    if len(test) <= 2:
+                        font2, ar_lines = ft, test
+                        break
+
+            ar_line_h = 0
+            for i, al in enumerate(ar_lines):
+                bb = measure_ar(draw, al, font2)
+                w, h = bb[2] - bb[0], bb[3] - bb[1]
+                ar_line_h = h
+                x = (W - w) // 2
+                y = line2_y + i * int(h * 1.3)
+                draw_text_shadow(draw, (x, y), al, font2, (255, 255, 255, 255), is_ar=True)
+
+            # Then the English line BELOW Arabic (in accent color)
+            en_y = line2_y + len(ar_lines) * int(ar_line_h * 1.3) + 10
+            font_en, size_en = fit_text_to_width(draw, line2_en, max_text_width, base_size - 8,
+                                                   min_font_size=18, font_name=font_name, is_ar=False)
+            en_lines = wrap_text_to_width(draw, line2_en, font_en, max_text_width, is_ar=False)
+            if len(en_lines) > 2:
+                for sz in range(size_en - 2, 14, -2):
+                    ft = load_font(font_name, sz)
+                    test = wrap_text_to_width(draw, line2_en, ft, max_text_width, is_ar=False)
+                    if len(test) <= 2:
+                        font_en, en_lines = ft, test
+                        break
+
+            en_line_h = 0
+            for i, el in enumerate(en_lines):
+                bb = draw.textbbox((0, 0), el, font=font_en)
+                w, h = bb[2] - bb[0], bb[3] - bb[1]
+                en_line_h = h
+                x = (W - w) // 2
+                y = en_y + i * int(h * 1.3)
+                draw_text_shadow(draw, (x, y), el, font_en, hex_to_rgba(accent))
+
+            line_height = en_y + len(en_lines) * int(en_line_h * 1.3) - line2_y
         else:
             # Single-line rendering (works for AR, EN, FR)
             font2, _ = fit_text_to_width(draw, line2_ar, max_text_width, base_size - 4,

@@ -340,7 +340,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.7 (إعدادات تصدير الفيديو + 2 API keys مع تدوير تلقائي)"
+        "• الإصدار: 3.8 (التفاف العنوان الفرعي AR/EN + إعدادات تصدير الفيديو)"
     )
     await update.message.reply_text(msg)
 
@@ -1919,7 +1919,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.7 (EXPORT-PRESETS+API-KEY-ROTATION+FASTER)...")
+    logger.info("🤖 Starting 4Ever Bot v3.8 (SUBTITLE-WRAP+EXPORT-PRESETS+KEY-ROTATION)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
