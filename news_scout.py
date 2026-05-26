@@ -14,6 +14,49 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not set")
 
+# 🔑 API key pool - rotates on rate-limit failures
+# Primary from env, backups hardcoded as fallback
+_BACKUP_KEYS = ["AIzaSyAE20l5g5dVJyijeLno6VYXHBqMr73Bmt8"]
+GEMINI_API_KEYS = [GEMINI_API_KEY] + [k for k in _BACKUP_KEYS if k and k != GEMINI_API_KEY]
+_KEY_FAILURES = {k: 0 for k in GEMINI_API_KEYS}  # tracks consecutive failures per key
+_KEY_INDEX = [0]  # mutable so functions can rotate
+
+def get_current_key():
+    """Get the current active Gemini API key (with rotation on rate limit)."""
+    return GEMINI_API_KEYS[_KEY_INDEX[0] % len(GEMINI_API_KEYS)]
+
+def rotate_key():
+    """Rotate to the next API key. Called when a key hits rate limit."""
+    old_idx = _KEY_INDEX[0]
+    _KEY_INDEX[0] = (_KEY_INDEX[0] + 1) % len(GEMINI_API_KEYS)
+    if len(GEMINI_API_KEYS) > 1:
+        import logging
+        logging.getLogger("4ever_bot").info(f"🔑 Rotating API key {old_idx} → {_KEY_INDEX[0]}")
+
+
+def _gemini_request(model, body, timeout=45):
+    """Make a Gemini API request with automatic key rotation on rate limits.
+    Returns the response object, or None if all keys exhausted for this model.
+    """
+    import requests
+    attempts = len(GEMINI_API_KEYS)
+    for _ in range(attempts):
+        key = get_current_key()
+        url = f"{GEMINI_API_BASE}/{model}:generateContent?key={key}"
+        try:
+            r = requests.post(url, json=body, timeout=timeout)
+        except Exception:
+            return None
+        # Rate-limit or quota → rotate key + retry once
+        if r.status_code in (429, 403):
+            log.warning(f"   🔄 Key {_KEY_INDEX[0]} hit {r.status_code}, rotating to next key...")
+            rotate_key()
+            continue
+        # Success or non-rate-limit error → return as-is
+        return r
+    return None
+
+
 # Fallback chain - each model has SEPARATE daily quota in Gemini Free Tier
 FALLBACK_MODELS = [
     # Tier 1: Newest 3.x family (best, separate quotas each)
@@ -479,14 +522,20 @@ def _call_gemini(prompt, body_overrides=None):
 
     last_err = None
     for idx, model in enumerate(FALLBACK_MODELS):
-        url = f"{GEMINI_API_BASE}/{model}:generateContent?key={GEMINI_API_KEY}"
+        url = f"{GEMINI_API_BASE}/{model}:generateContent?key={get_current_key()}"
         try:
             log.info(f"🤖 Model {idx+1}/{len(FALLBACK_MODELS)}: {model}")
             r = requests.post(url, json=body, timeout=90)
             if r.status_code == 429:
-                log.warning(f"   ⚠️  {model} rate limited, trying next...")
+                log.warning(f"   ⚠️  {model} rate limited (key {_KEY_INDEX[0]}), rotating key + trying next...")
+                rotate_key()
                 last_err = RuntimeError(f"{model} rate limited")
                 time.sleep(2)
+                continue
+            if r.status_code == 403:
+                log.warning(f"   ⚠️  {model} key blocked, rotating...")
+                rotate_key()
+                last_err = RuntimeError(f"{model} key blocked")
                 continue
             if r.status_code == 404:
                 log.warning(f"   ⚠️  {model} not found")
@@ -885,8 +934,11 @@ If you cannot access the URL, set is_accessible to false and explain in topic_su
 
     for model in FALLBACK_MODELS:
         try:
-            api_url = f"{GEMINI_API_BASE}/{model}:generateContent?key={GEMINI_API_KEY}"
+            api_url = f"{GEMINI_API_BASE}/{model}:generateContent?key={get_current_key()}"
             r = requests.post(api_url, json=body, timeout=45)
+            if r.status_code in (429, 403):
+                rotate_key()
+                continue
             if r.status_code != 200:
                 continue
             data = r.json()
@@ -1132,8 +1184,11 @@ def extract_post_from_screenshot(image_path):
 
     for model in FALLBACK_MODELS:
         try:
-            url = f"{GEMINI_API_BASE}/{model}:generateContent?key={GEMINI_API_KEY}"
+            url = f"{GEMINI_API_BASE}/{model}:generateContent?key={get_current_key()}"
             r = requests.post(url, json=body, timeout=30)
+            if r.status_code in (429, 403):
+                rotate_key()
+                continue
             if r.status_code != 200:
                 continue
             data = r.json()

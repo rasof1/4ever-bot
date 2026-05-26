@@ -43,6 +43,113 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 PENDING_NEWS = {}
 POST_HISTORY = {}  # user_id -> {news, cfg_template} for regeneration
 
+# 🎬 Video export presets - user picks before processing
+VIDEO_EXPORT_PRESETS = {
+    "auto": {
+        "label": "🎯 تلقائي (مقاس الفيديو الأصلي)",
+        "desc": "يحافظ على دقة الفيديو الأصلية + سرعة معقولة",
+        "canvas_strategy": "native",   # canvas matches video native size
+        "fps": 24,
+        "crf": 28,                      # better quality
+        "preset": "ultrafast",
+        "audio_bitrate": "96k",
+        "max_canvas_w": 1920,
+    },
+    "fast": {
+        "label": "⚡ سريع (720p - أسرع)",
+        "desc": "تصدير 2x أسرع، جودة جيدة للسوشيال (موصى به)",
+        "canvas_strategy": "720p",
+        "fps": 24,
+        "crf": 30,
+        "preset": "ultrafast",
+        "audio_bitrate": "64k",
+        "max_canvas_w": 720,
+    },
+    "tiktok": {
+        "label": "🎵 تيك توك (1080×1920 9:16)",
+        "desc": "مقاس عمودي مثالي لتيك توك وريلز",
+        "canvas_strategy": "fixed",
+        "canvas_w": 1080,
+        "canvas_h": 1920,
+        "fps": 30,
+        "crf": 28,
+        "preset": "ultrafast",
+        "audio_bitrate": "128k",
+    },
+    "youtube": {
+        "label": "📺 يوتيوب (1920×1080 16:9)",
+        "desc": "مقاس أفقي لشورتس/يوتيوب",
+        "canvas_strategy": "fixed",
+        "canvas_w": 1920,
+        "canvas_h": 1080,
+        "fps": 30,
+        "crf": 28,
+        "preset": "ultrafast",
+        "audio_bitrate": "128k",
+    },
+    "instagram": {
+        "label": "📷 إنستغرام (1080×1350 4:5)",
+        "desc": "بوست إنستغرام (4:5)",
+        "canvas_strategy": "fixed",
+        "canvas_w": 1080,
+        "canvas_h": 1350,
+        "fps": 30,
+        "crf": 28,
+        "preset": "ultrafast",
+        "audio_bitrate": "128k",
+    },
+    "high": {
+        "label": "💎 جودة عالية (1080p ممتاز)",
+        "desc": "أعلى جودة، أبطأ تصدير وأكبر حجم",
+        "canvas_strategy": "native",
+        "fps": 30,
+        "crf": 22,
+        "preset": "fast",
+        "audio_bitrate": "192k",
+        "max_canvas_w": 1920,
+    },
+}
+
+
+def apply_preset_to_canvas(preset_key, vid_w, vid_h):
+    """Returns (canvas_w, canvas_h) for the chosen export preset."""
+    preset = VIDEO_EXPORT_PRESETS.get(preset_key, VIDEO_EXPORT_PRESETS["auto"])
+    strategy = preset["canvas_strategy"]
+
+    if strategy == "fixed":
+        return preset["canvas_w"], preset["canvas_h"]
+
+    if strategy == "720p":
+        # Match video aspect but cap at 720 wide
+        aspect = vid_w / vid_h
+        if aspect >= 1:  # landscape/square
+            canvas_w = 720
+            media_h = int(720 * 0.85 / aspect)
+        else:  # portrait
+            canvas_w = max(720, int(vid_w * 720 / max(vid_w, vid_h) / 0.85))
+            canvas_w = min(canvas_w, 720)
+            media_h = int(canvas_w * 0.85 / aspect)
+        canvas_h = media_h + 140 + 280 + 30
+        canvas_w = (canvas_w // 2) * 2
+        canvas_h = max(720, min(canvas_h, 1600))
+        canvas_h = (canvas_h // 2) * 2
+        return canvas_w, canvas_h
+
+    # "native" strategy - canvas matches video resolution
+    max_w = preset.get("max_canvas_w", 1920)
+    native_canvas_w = int(vid_w / 0.85)
+    canvas_w = max(1080, min(native_canvas_w, max_w))
+    canvas_w = (canvas_w // 2) * 2
+    media_display_w = int(canvas_w * 0.85)
+    media_display_h = int(media_display_w / (vid_w / vid_h))
+    canvas_h = media_display_h + 140 + 280 + 30
+    canvas_h = max(1080, min(canvas_h, 2400))
+    canvas_h = (canvas_h // 2) * 2
+    return canvas_w, canvas_h
+
+
+
+
 def cleanup_old_temp_files(user_id=None, max_age_seconds=300):
     """Clean up old temporary files in OUTPUT_DIR.
     Removes ALL files older than 5 minutes by default.
@@ -233,7 +340,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.6 (فيديو بأبعاده الأصلية + زر تنظيف الذاكرة + حد 20MB صادق)"
+        "• الإصدار: 3.7 (إعدادات تصدير الفيديو + 2 API keys مع تدوير تلقائي)"
     )
     await update.message.reply_text(msg)
 
@@ -318,7 +425,7 @@ def parse_count(text):
 
 
 async def composite_video_into_design(bg_png, overlay_png, design_box, video_path, output_mp4,
-                                       canvas_w=1080, canvas_h=1080):
+                                       canvas_w=1080, canvas_h=1080, preset=None):
     """
     Composite a video INTO the 4Ever design with 3 layers:
     
@@ -350,31 +457,36 @@ async def composite_video_into_design(bg_png, overlay_png, design_box, video_pat
     )
 
     try:
+        # Get preset values (with safe defaults)
+        fps = preset.get("fps", 24) if preset else 24
+        crf = preset.get("crf", 30) if preset else 30
+        enc_preset = preset.get("preset", "ultrafast") if preset else "ultrafast"
+        audio_br = preset.get("audio_bitrate", "64k") if preset else "64k"
+
         cmd = [
             ffmpeg_bin, "-y",
-            # Fast image inputs at 24fps for speed (TikTok/IG default)
-            "-framerate", "24", "-loop", "1", "-i", bg_png,
+            "-framerate", str(fps), "-loop", "1", "-i", bg_png,
             "-i", video_path,
-            "-framerate", "24", "-loop", "1", "-i", overlay_png,
+            "-framerate", str(fps), "-loop", "1", "-i", overlay_png,
             "-filter_complex", filter_complex,
             "-map", "[out]",
-            "-map", "1:a?",                          # audio from video (optional)
-            # 🚀 FAST encoding settings
+            "-map", "1:a?",
             "-c:v", "libx264",
-            "-preset", "ultrafast",                  # fastest preset
-            "-tune", "fastdecode",                   # faster decode
-            "-crf", "30",                            # slightly lower quality but 2x faster
+            "-preset", enc_preset,
+            "-tune", "fastdecode",
+            "-crf", str(crf),
             "-pix_fmt", "yuv420p",
-            "-r", "24",  # Output 24fps (40% faster than 30fps)
+            "-r", str(fps),
             "-c:a", "aac",
-            "-b:a", "64k",                           # lower audio bitrate
+            "-b:a", audio_br,
             "-ar", "44100",
-            "-shortest",                             # stop when shortest stream ends (the video)
+            "-shortest",
             "-movflags", "+faststart",
-            "-t", "180",                             # max 3 min
-            "-threads", "0",                         # use all CPU cores
+            "-t", "180",
+            "-threads", "0",
             output_mp4
         ]
+        logger.info(f"   🎛️  Preset: fps={fps}, crf={crf}, preset={enc_preset}, audio={audio_br}")
         logger.info(f"   Running ffmpeg composite (ultrafast preset)...")
         result = subprocess.run(cmd, capture_output=True, timeout=300)  # 5 min timeout (was 7)
 
@@ -412,25 +524,14 @@ async def render_with_image(message, news, img_path, progress, video_path=None, 
     if video_path and os.path.exists(video_path):
         await progress.edit_text("🔍 جاري تحليل الفيديو...")
 
-        # 🎯 Detect video dimensions to choose canvas size
+        # 🎯 Detect video dimensions
         vid_w, vid_h = get_video_dimensions(video_path)
-        canvas_w, canvas_h = choose_canvas_size_for_aspect(vid_w, vid_h)
 
-        # 🎯 PRESERVE video native resolution - canvas matches video size, not forced 1080
-        # Frame inside = 85% of canvas_w, so canvas_w = ceil(video_w / 0.85)
-        # Min 1080 (so chrome is readable), max 1920 (avoid huge files)
-        native_canvas_w = int(vid_w / 0.85)
-        canvas_w = max(1080, min(native_canvas_w, 1920))
-        canvas_w = (canvas_w // 2) * 2  # even number for codec
-
-        # Recalculate canvas_h based on new canvas_w
-        media_display_w = int(canvas_w * 0.85)
-        media_display_h = int(media_display_w / (vid_w / vid_h))
-        CHROME_TOP = 140; CHROME_BOTTOM = 280; PADDING = 30
-        canvas_h = media_display_h + CHROME_TOP + CHROME_BOTTOM + PADDING
-        canvas_h = max(1080, min(canvas_h, 2400))
-        canvas_h = (canvas_h // 2) * 2
-        logger.info(f"   📐 Native canvas for video: {canvas_w}x{canvas_h} (video {vid_w}x{vid_h})")
+        # 🎬 Apply chosen export preset (or default to "auto")
+        preset_key = news.get("_export_preset", "auto")
+        preset = VIDEO_EXPORT_PRESETS.get(preset_key, VIDEO_EXPORT_PRESETS["auto"])
+        canvas_w, canvas_h = apply_preset_to_canvas(preset_key, vid_w, vid_h)
+        logger.info(f"   🎛️ Preset '{preset_key}': canvas {canvas_w}x{canvas_h} (video {vid_w}x{vid_h})")
 
         cfg["canvas_height"] = canvas_h
         cfg["output"]["size"] = canvas_w
@@ -464,7 +565,7 @@ async def render_with_image(message, news, img_path, progress, video_path=None, 
         video_out = str(OUTPUT_DIR / f"reel_{os.getpid()}_{id(news)}.mp4")
         success = await composite_video_into_design(
             bg_layer, overlay_layer, box_coords, video_path, video_out,
-            canvas_w=canvas_w, canvas_h=canvas_h
+            canvas_w=canvas_w, canvas_h=canvas_h, preset=preset
         )
 
         # Cleanup intermediate layers
@@ -939,6 +1040,152 @@ async def handle_regen_callback(update, ctx):
         except: pass
 
 
+async def handle_export_preset_callback(update, ctx):
+    """Handle user's video export preset selection."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
+
+    try:
+        # Parse: vexport_<preset_key>_<user_id> or vexport_cancel_<user_id>
+        parts = data.split("_")
+        preset_key = parts[1]
+
+        if preset_key == "cancel":
+            PENDING_NEWS.pop(user_id, None)
+            try:
+                await query.edit_message_text("❌ تم إلغاء معالجة الفيديو.")
+            except: pass
+            return
+
+        if preset_key not in VIDEO_EXPORT_PRESETS:
+            await query.edit_message_text("⚠️ خيار غير صحيح، حاول مرة أخرى.")
+            return
+
+        # Get the saved video info
+        pending = PENDING_NEWS.get(user_id)
+        if not pending or pending.get("kind") != "awaiting_export_preset":
+            await query.edit_message_text(
+                "⚠️ انتهت الجلسة. أرسل الفيديو مرة أخرى."
+            )
+            return
+
+        # Save preset choice and restore previous state
+        previous_kind = pending.get("previous_kind")
+        existing_news = pending.get("news")
+        is_video_doc = pending.get("is_video_doc")
+        chat_id = pending.get("chat_id") or query.message.chat_id
+        file_id = pending["video_file_id"]
+        file_size_mb = pending.get("video_size_mb", 0)
+        duration_s = pending.get("video_duration_s", 0)
+
+        preset = VIDEO_EXPORT_PRESETS[preset_key]
+
+        try:
+            await query.edit_message_text(
+                f"✅ *الإعدادات المختارة:* {preset['label']}\n\n"
+                f"🎬 جاري معالجة الفيديو...\n"
+                f"📊 {file_size_mb:.1f}MB | {duration_s}s\n"
+                f"⏳ سيستغرق دقيقة تقريباً لكل 30 ثانية فيديو",
+                parse_mode="Markdown"
+            )
+        except: pass
+
+        # Check Telegram 20MB limit
+        if file_size_mb > 19.5:
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"❌ *الفيديو حجمه {file_size_mb:.1f} MB*\n\n"
+                    f"تيليجرام يحدد التحميل بـ **20 MB كحد أقصى**.\n\n"
+                    f"💡 اضغط الفيديو إلى أقل من 20 MB ثم أعد الإرسال."
+                ),
+                parse_mode="Markdown"
+            )
+            PENDING_NEWS.pop(user_id, None)
+            return
+
+        # Download video
+        progress = await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=f"📥 جاري تنزيل الفيديو...\n🎛️ الإعدادات: {preset['label']}"
+        )
+
+        try:
+            tg_file = await ctx.bot.get_file(file_id)
+        except Exception as e:
+            err = str(e).lower()
+            if "file is too big" in err or "too large" in err:
+                await progress.edit_text(
+                    f"❌ تيليجرام رفض التحميل ({file_size_mb:.1f}MB).\n"
+                    f"الحد الأقصى 20 MB."
+                )
+                PENDING_NEWS.pop(user_id, None)
+                return
+            raise
+
+        video_path = str(OUTPUT_DIR / f"vid_{user_id}_{os.getpid()}.mp4")
+        await tg_file.download_to_drive(video_path)
+        logger.info(f"📥 Downloaded user video: {video_path} ({os.path.getsize(video_path)//1024}KB), preset={preset_key}")
+
+        # Update pending state - move forward with chosen preset
+        PENDING_NEWS[user_id] = {
+            "kind": "awaiting_caption" if not existing_news else previous_kind,
+            "video_path": video_path,
+            "video_size_mb": file_size_mb,
+            "export_preset": preset_key,
+            "news": existing_news,
+            "is_video_doc": is_video_doc,
+            "chat_id": chat_id,
+            "user_id": user_id,
+        }
+
+        # Route based on whether we have news already (regen flow) or need caption (fresh)
+        if existing_news:
+            # Regen flow - process directly
+            await _process_video_with_preset(query.message, ctx, user_id, video_path,
+                                              existing_news, preset_key, progress)
+        else:
+            # Fresh upload - ask for caption
+            await progress.edit_text(
+                "📝 الآن أرسل وصف الفيديو (caption) أو رابط، وسأبني المنشور الكامل.\n\n"
+                "💡 يمكنك إرسال:\n"
+                "• نص يصف الفيديو\n"
+                "• رابط من Twitter/X/YouTube/Facebook\n"
+                "• أو أكتب /cancel للإلغاء"
+            )
+
+    except Exception as e:
+        logger.error(f"export preset callback failed: {e}\n{traceback.format_exc()}")
+        try:
+            await query.edit_message_text(f"❌ فشل: {str(e)[:200]}")
+        except: pass
+
+
+async def _process_video_with_preset(message, ctx, user_id, video_path, news, preset_key, progress):
+    """Process a video using the chosen export preset (called from callbacks)."""
+    try:
+        frame_path = str(OUTPUT_DIR / f"frame_{user_id}_{os.getpid()}.jpg")
+        extract_success = await extract_video_frame(video_path, frame_path)
+        if not extract_success:
+            await progress.edit_text("❌ فشل استخراج إطار من الفيديو.")
+            PENDING_NEWS.pop(user_id, None)
+            try: os.unlink(video_path)
+            except: pass
+            return
+
+        # Mark preset on news so render_with_image picks it up
+        news["_export_preset"] = preset_key
+        PENDING_NEWS.pop(user_id, None)
+        await render_with_image(message, news, frame_path, progress,
+                                  video_path=video_path, user_id=user_id)
+    except Exception as e:
+        logger.error(f"_process_video_with_preset failed: {e}\n{traceback.format_exc()}")
+        try: await progress.edit_text(f"❌ فشل: {str(e)[:200]}")
+        except: pass
+
+
 async def handle_language_choice(update, ctx):
     """Callback when user selects a language.
     For Arabic, this routes to dialect picker first.
@@ -1351,6 +1598,57 @@ async def handle_video(update, ctx):
     if not video and not is_video_doc:
         return  # not actually a video
 
+    # 🎬 Show export preset picker FIRST (before any download/processing)
+    # This lets user pick quality/format → less load on bot + faster processing
+    file_obj = video or document
+    file_size_mb = (file_obj.file_size or 0) / (1024 * 1024)
+    duration_s = getattr(video, "duration", 0) if video else 0
+
+    # Show export presets if not already chosen
+    if not pending or not pending.get("export_preset"):
+        # Save the video info for after user picks preset
+        existing_news = pending.get("news") if pending else None
+        existing_kind = pending.get("kind") if pending else None
+        PENDING_NEWS[user_id] = {
+            "kind": "awaiting_export_preset",
+            "video_file_id": file_obj.file_id,
+            "video_size_mb": file_size_mb,
+            "video_duration_s": duration_s,
+            "news": existing_news,
+            "previous_kind": existing_kind,
+            "is_video_doc": is_video_doc,
+            "chat_id": update.message.chat_id,
+            "user_id": user_id,
+        }
+
+        # Build the preset selection keyboard
+        kb_rows = []
+        preset_order = ["auto", "fast", "tiktok", "youtube", "instagram", "high"]
+        for i in range(0, len(preset_order), 2):
+            row = []
+            for key in preset_order[i:i+2]:
+                p = VIDEO_EXPORT_PRESETS[key]
+                row.append(InlineKeyboardButton(p["label"], callback_data=f"vexport_{key}_{user_id}"))
+            kb_rows.append(row)
+        kb_rows.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"vexport_cancel_{user_id}")])
+        kb = InlineKeyboardMarkup(kb_rows)
+
+        # Show details about each preset
+        details = "\n".join([
+            f"• *{VIDEO_EXPORT_PRESETS[k]['label']}*\n  └ {VIDEO_EXPORT_PRESETS[k]['desc']}"
+            for k in preset_order
+        ])
+
+        await update.message.reply_text(
+            f"🎬 *وصلني فيديوك ({file_size_mb:.1f}MB، {duration_s}s)*\n\n"
+            f"اختر إعدادات التصدير:\n\n"
+            f"{details}\n\n"
+            f"💡 *نصيحة:* الوضع \"⚡ سريع\" يضمن معالجة أسرع وأقل ضغط على البوت",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+        return
+
     # Case 1: User uploading custom video for pending news (fresh or regen)
     if pending and (pending.get("awaiting_image") or pending.get("kind") == "awaiting_custom_media"):
         news = pending["news"]
@@ -1621,7 +1919,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.6 (NATIVE-VIDEO+CLEAN-MENU+20MB-LIMIT+BETTER-AI)...")
+    logger.info("🤖 Starting 4Ever Bot v3.7 (EXPORT-PRESETS+API-KEY-ROTATION+FASTER)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1637,6 +1935,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_language_choice, pattern=r"^lang_(ar|en|fr)_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_dialect_choice, pattern=r"^dial_(fusha|egyptian|levantine|saudi|algerian|emirati|moroccan)_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_regen_callback, pattern=r"^regen_(ai|upload|done)_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_export_preset_callback, pattern=r"^vexport_(auto|fast|tiktok|youtube|instagram|high|cancel)_\d+$"))
 
     # 🆕 Videos & animations (GIF) → handle_video
     app.add_handler(MessageHandler(
