@@ -96,8 +96,8 @@ def paste_main_asset(canvas, asset_path, target_w, radius, glow_color, glow_alph
     img_w, img_h = img.size
     W, H = canvas.size
 
-    SAFE_TOP = 175
-    HEADLINE_RESERVED = 400
+    SAFE_TOP = 140          # Reduced for video native fit (was 175)
+    HEADLINE_RESERVED = 280  # Reduced (was 400)
     SAFE_BOTTOM = H - HEADLINE_RESERVED
     SAFE_WIDTH = int(W * 0.85)
 
@@ -612,8 +612,8 @@ def generate_post_layers(config: dict, bg_path: str, overlay_path: str, seed: in
 
     # 🎯 Compute box coords directly (no dummy image hack)
     W, H = bg_canvas.size
-    SAFE_TOP = 175
-    HEADLINE_RESERVED = 400
+    SAFE_TOP = 140          # Reduced for video native fit (was 175)
+    HEADLINE_RESERVED = 280  # Reduced (was 400)
     SAFE_BOTTOM = H - HEADLINE_RESERVED
     SAFE_WIDTH = int(W * 0.85)
     available_h = SAFE_BOTTOM - SAFE_TOP

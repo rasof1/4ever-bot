@@ -121,6 +121,16 @@ def base_config(main_image_path, news):
 
 
 async def cmd_start(update, ctx):
+    # Reply keyboard with main actions
+    from telegram import ReplyKeyboardMarkup, KeyboardButton
+    kb = ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📰 منشور جديد"), KeyboardButton("🧹 تنظيف الذاكرة")],
+            [KeyboardButton("📖 المساعدة"), KeyboardButton("⚙️ الحالة")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
     msg = (
         "🌌 *مرحباً بك في بوت 4Ever* 🌌\n\n"
         "أنا بوتك الذكي لتوليد منشورات تقنية احترافية.\n\n"
@@ -128,14 +138,49 @@ async def cmd_start(update, ctx):
         "🎯 الوضع التلقائي:\n"
         "• `منشور` ← خبر تقني عشوائي\n"
         f"• `منشور 3` ← عدة منشورات (حد {MAX_POSTS})\n\n"
-        "🔄 الوضع العكسي (جديد!):\n"
-        "• أرسل رابط خبر/Facebook/Twitter\n"
+        "🔄 الوضع العكسي:\n"
+        "• أرسل رابط خبر/Facebook/Twitter/Instagram\n"
         "• أرسل وصف خبر\n"
-        "• أرسل صورة + كابشن\n"
-        "→ سيسألك: هل عندك صورة؟ (نعم/لا)\n\n"
-        "🚀 جرّب الآن: أرسل `منشور`"
+        "• أرسل صورة/فيديو + كابشن\n\n"
+        "🧠 طلب ذكي:\n"
+        "• `اريد منشور عن أحدث AI...`\n"
+        "• `اعمل لي بوست يشرح...`\n\n"
+        "🧹 *تنظيف الذاكرة:*\n"
+        "اضغط الزر أو `/clean` لمسح كل الصور والجلسات المؤقتة\n\n"
+        "🚀 جرّب الآن!"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
+
+
+async def cmd_clean(update, ctx):
+    """🧹 Clean ALL temp files + user state for the calling user."""
+    user_id = update.effective_user.id
+    cleaned_files = 0
+    try:
+        # Force-clean ALL temp files (not just old ones)
+        if OUTPUT_DIR.exists():
+            for fname in os.listdir(OUTPUT_DIR):
+                fpath = OUTPUT_DIR / fname
+                try:
+                    if fpath.is_file():
+                        fpath.unlink()
+                        cleaned_files += 1
+                except: pass
+    except Exception as e:
+        logger.warning(f"clean failed: {e}")
+
+    # Clear user state
+    PENDING_NEWS.pop(user_id, None)
+    POST_HISTORY.pop(user_id, None)
+
+    await update.message.reply_text(
+        f"🧹 *تم تنظيف الذاكرة المؤقتة!*\n\n"
+        f"✅ حُذفت {cleaned_files} ملف مؤقت\n"
+        f"✅ مُسحت جلستك الحالية\n"
+        f"✅ لن تظهر صور قديمة في المنشورات القادمة\n\n"
+        f"💡 ابدأ من جديد بإرسال: `منشور` أو رابط",
+        parse_mode="Markdown"
+    )
 
 
 async def cmd_help(update, ctx):
@@ -188,7 +233,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.5 (روابط تعمل 100% + Gemini grounding + og:image تلقائياً)"
+        "• الإصدار: 3.6 (فيديو بأبعاده الأصلية + زر تنظيف الذاكرة + حد 20MB صادق)"
     )
     await update.message.reply_text(msg)
 
@@ -307,10 +352,10 @@ async def composite_video_into_design(bg_png, overlay_png, design_box, video_pat
     try:
         cmd = [
             ffmpeg_bin, "-y",
-            # Fast image inputs - no looping overhead
-            "-framerate", "30", "-loop", "1", "-i", bg_png,        # input 0: background
-            "-i", video_path,                                       # input 1: user video
-            "-framerate", "30", "-loop", "1", "-i", overlay_png,   # input 2: overlay
+            # Fast image inputs at 24fps for speed (TikTok/IG default)
+            "-framerate", "24", "-loop", "1", "-i", bg_png,
+            "-i", video_path,
+            "-framerate", "24", "-loop", "1", "-i", overlay_png,
             "-filter_complex", filter_complex,
             "-map", "[out]",
             "-map", "1:a?",                          # audio from video (optional)
@@ -320,6 +365,7 @@ async def composite_video_into_design(bg_png, overlay_png, design_box, video_pat
             "-tune", "fastdecode",                   # faster decode
             "-crf", "30",                            # slightly lower quality but 2x faster
             "-pix_fmt", "yuv420p",
+            "-r", "24",  # Output 24fps (40% faster than 30fps)
             "-c:a", "aac",
             "-b:a", "64k",                           # lower audio bitrate
             "-ar", "44100",
@@ -370,17 +416,24 @@ async def render_with_image(message, news, img_path, progress, video_path=None, 
         vid_w, vid_h = get_video_dimensions(video_path)
         canvas_w, canvas_h = choose_canvas_size_for_aspect(vid_w, vid_h)
 
-        # 🚀 SPEED: for video mode, use 720-wide canvas (vs 1080) - 2x faster, still HD quality
-        # The design is generated at 720 then scales perfectly on social media
-        if canvas_w > 720:
-            scale = 720 / canvas_w
-            canvas_w = 720
-            canvas_h = (int(canvas_h * scale) // 2) * 2  # even
-            logger.info(f"   🚀 Scaling canvas down to 720x{canvas_h} for faster encoding")
+        # 🎯 PRESERVE video native resolution - canvas matches video size, not forced 1080
+        # Frame inside = 85% of canvas_w, so canvas_w = ceil(video_w / 0.85)
+        # Min 1080 (so chrome is readable), max 1920 (avoid huge files)
+        native_canvas_w = int(vid_w / 0.85)
+        canvas_w = max(1080, min(native_canvas_w, 1920))
+        canvas_w = (canvas_w // 2) * 2  # even number for codec
 
-        # Inject canvas_height into config
+        # Recalculate canvas_h based on new canvas_w
+        media_display_w = int(canvas_w * 0.85)
+        media_display_h = int(media_display_w / (vid_w / vid_h))
+        CHROME_TOP = 140; CHROME_BOTTOM = 280; PADDING = 30
+        canvas_h = media_display_h + CHROME_TOP + CHROME_BOTTOM + PADDING
+        canvas_h = max(1080, min(canvas_h, 2400))
+        canvas_h = (canvas_h // 2) * 2
+        logger.info(f"   📐 Native canvas for video: {canvas_w}x{canvas_h} (video {vid_w}x{vid_h})")
+
         cfg["canvas_height"] = canvas_h
-        cfg["output"]["size"] = canvas_w  # Override default 1080
+        cfg["output"]["size"] = canvas_w
 
         await progress.edit_text(
             f"🎨 جاري تصميم طبقات المنشور...\n"
@@ -814,43 +867,68 @@ async def handle_regen_callback(update, ctx):
             # Regenerate the image using AI based on the news content
             history = POST_HISTORY.get(user_id)
             if not history or not history.get("news"):
-                await query.edit_message_text("⚠️ انتهت الجلسة، أرسل /post للبدء من جديد")
+                await query.edit_message_text(
+                    "⚠️ انتهت الجلسة المؤقتة. أرسل `/post` أو رابط للبدء من جديد.\n\n"
+                    "💡 الذاكرة المؤقتة تنتهي بعد 30 دقيقة من آخر منشور.",
+                    parse_mode="Markdown"
+                )
                 return
 
             news = history["news"]
             try:
-                await query.edit_message_text("🎨 جاري توليد صورة جديدة بالذكاء الاصطناعي...\n⏳ ~30 ثانية")
+                await query.edit_message_text(
+                    "🎨 *جاري توليد صورة جديدة بالذكاء الاصطناعي...*\n"
+                    f"🎯 الموضوع: {news.get('headline_line1', '')[:50]}\n"
+                    f"⏳ ~20-40 ثانية..."
+                , parse_mode="Markdown")
             except: pass
 
-            # Generate fresh AI image
+            # 🆕 Use multiple seeds + try best models for HIGH quality
             from news_scout import generate_ai_image
-            img_path = str(OUTPUT_DIR / f"regen_{user_id}_{os.getpid()}.jpg")
+            import random, time
+            img_path = str(OUTPUT_DIR / f"regen_ai_{user_id}_{int(time.time())}.jpg")
 
-            # Build a strong, clean prompt
+            # 🎯 Build a HIGH-QUALITY prompt that focuses on the actual subject
+            subject = (news.get("image_prompt") or news.get("image_query")
+                       or news.get("headline_line2_en") or news.get("headline_line1") or "tech product")
+            subject = subject[:300]
+
+            # Use professional AI image style
             ai_prompt = (
-                f"professional clean product photo, "
-                f"{news.get('image_prompt', news.get('image_query', ''))[:300]}, "
-                f"studio lighting, photorealistic, 8k, no people, no text, no logos, "
-                f"corporate announcement style"
+                f"{subject}, professional product photography, ultra detailed, sharp focus, "
+                f"studio lighting, cinematic, 8k quality, photorealistic, "
+                f"professional composition, no text overlay, no watermark"
             )
 
+            # Random seed for variety on re-clicks
+            seed = random.randint(1, 999999)
+
             loop = asyncio.get_event_loop()
-            got = await loop.run_in_executor(None, generate_ai_image, ai_prompt, img_path)
+            def gen():
+                try:
+                    return generate_ai_image(ai_prompt, img_path, seed=seed)
+                except TypeError:
+                    return generate_ai_image(ai_prompt, img_path)
+
+            got = await loop.run_in_executor(None, gen)
 
             if not got or not os.path.exists(img_path):
                 try:
-                    await query.edit_message_text("❌ فشل توليد الصورة، حاول مرة أخرى")
+                    await query.edit_message_text(
+                        "❌ فشل توليد الصورة.\n\n"
+                        "حاول مرة أخرى - أحياناً الخادم مشغول لحظياً.\n"
+                        "أو ارفع صورة من جهازك بدلاً منها."
+                    )
                 except: pass
                 return
 
-            # Render new post with the new image
-            try:
-                await query.message.delete()
+            # Render new post with the new AI image
+            try: await query.message.delete()
             except: pass
 
             new_progress = await ctx.bot.send_message(
                 chat_id=query.message.chat_id,
-                text="🎨 جاري إعادة بناء المنشور بالصورة الجديدة..."
+                text="✅ تم توليد الصورة!\n🎨 جاري إعادة بناء المنشور..."
             )
             await render_with_image(query.message, news, img_path, new_progress, user_id=user_id)
 
@@ -1282,21 +1360,25 @@ async def handle_video(update, ctx):
         file_size_mb = (file_obj.file_size or 0) / (1024 * 1024)
         duration_s = getattr(video, "duration", 0) if video else 0
 
-        # Check limits
-        MAX_SIZE_MB = 100
-        MAX_DURATION_S = 180  # 3 minutes
+        # 🎯 Telegram Bot API hard limit: 20 MB per file download (cannot be raised on free tier)
+        # We allow up to 19.5MB to be safe
+        TELEGRAM_MAX_MB = 19.5
+        MAX_DURATION_S = 180  # 3 minutes - softer limit, video is trimmed via ffmpeg -t
 
         warnings = []
-        if file_size_mb > MAX_SIZE_MB:
-            warnings.append(f"⚠️ الحجم {file_size_mb:.1f}MB يتجاوز الحد الأقصى {MAX_SIZE_MB}MB")
         if duration_s > MAX_DURATION_S:
-            warnings.append(f"⚠️ المدة {duration_s}s تتجاوز الحد الأقصى {MAX_DURATION_S}s (سيُقص لـ 3 دقائق)")
+            warnings.append(f"⚠️ المدة {duration_s}s ستُقص إلى 3 دقائق")
 
-        if file_size_mb > MAX_SIZE_MB * 1.5:  # too large, abort
+        # HARD STOP for files over Telegram's download limit
+        if file_size_mb > TELEGRAM_MAX_MB:
             await update.message.reply_text(
-                f"❌ *الفيديو كبير جداً ({file_size_mb:.1f}MB)*\n\n"
-                f"الحد الأقصى المسموح: {MAX_SIZE_MB}MB\n"
-                f"الرجاء ضغط الفيديو أو رفع نسخة أصغر.",
+                f"❌ *الفيديو حجمه {file_size_mb:.1f} MB*\n\n"
+                f"تيليجرام يحدد تحميل الفيديوهات من البوت بـ **20 MB كحد أقصى** (حد فني من تيليجرام لا يمكن تجاوزه).\n\n"
+                f"💡 *الحلول:*\n"
+                f"• اضغط الفيديو إلى أقل من 20 MB (موجود تطبيقات ضغط فيديو)\n"
+                f"• أو قص جزء أقصر من الفيديو\n"
+                f"• أو ارفع جودة أقل (720p بدل 4K)\n\n"
+                f"⚠️ هذا قيد من تيليجرام نفسه، ليس من البوت.",
                 parse_mode="Markdown"
             )
             PENDING_NEWS.pop(user_id, None)
@@ -1316,8 +1398,19 @@ async def handle_video(update, ctx):
             parse_mode="Markdown"
         )
         try:
-            # Download video
-            tg_file = await ctx.bot.get_file(file_obj.file_id)
+            # Download video - may fail if > 20MB
+            try:
+                tg_file = await ctx.bot.get_file(file_obj.file_id)
+            except Exception as e:
+                err = str(e).lower()
+                if "file is too big" in err or "too large" in err:
+                    await progress.edit_text(
+                        f"❌ تيليجرام رفض تحميل الفيديو ({file_size_mb:.1f}MB).\n"
+                        f"الحد الأقصى للتحميل عبر البوت = 20 MB. اضغط الفيديو وأعد المحاولة."
+                    )
+                    PENDING_NEWS.pop(user_id, None)
+                    return
+                raise
 
             video_path = str(OUTPUT_DIR / f"vid_{user_id}_{os.getpid()}.mp4")
             await tg_file.download_to_drive(video_path)
@@ -1483,6 +1576,16 @@ async def extract_video_frame(video_path, frame_path):
 async def handle_text_router(update, ctx):
     text = (update.message.text or "").strip()
     cleanup_old_temp_files(user_id=update.effective_user.id)
+
+    # 🆕 Handle persistent ReplyKeyboard buttons
+    if text == "🧹 تنظيف الذاكرة":
+        return await cmd_clean(update, ctx)
+    if text == "📰 منشور جديد":
+        return await cmd_post(update, ctx)
+    if text == "📖 المساعدة":
+        return await cmd_help(update, ctx)
+    if text == "⚙️ الحالة":
+        return await cmd_status(update, ctx)
     if not text:
         return
 
@@ -1518,7 +1621,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.5 (URL-EXTRACTION-WORKS+OG-IMAGE+GEMINI-GROUNDING)...")
+    logger.info("🤖 Starting 4Ever Bot v3.6 (NATIVE-VIDEO+CLEAN-MENU+20MB-LIMIT+BETTER-AI)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1527,6 +1630,7 @@ def main():
     app.add_handler(CommandHandler("post", cmd_post))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("lang", cmd_lang))
+    app.add_handler(CommandHandler("clean", cmd_clean))
 
     # Callback query handlers for inline buttons
     app.add_handler(CallbackQueryHandler(handle_image_choice, pattern=r"^img_(yes|no)_\d+$"))
