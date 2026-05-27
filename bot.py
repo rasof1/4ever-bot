@@ -40,8 +40,90 @@ OUTPUT_DIR = ROOT / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # In-memory state: user_id → {"news": ..., "awaiting_image": bool}
-PENDING_NEWS = {}
-POST_HISTORY = {}  # user_id -> {news, cfg_template} for regeneration
+# 💾 Persist state to disk so it survives bot restarts (Render Free sleeps after inactivity)
+STATE_FILE = OUTPUT_DIR / "_bot_state.json"
+
+class _PersistentDict(dict):
+    """A dict that automatically saves to disk on every mutation."""
+    _save_fn = None  # set after _save_state is defined
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if _PersistentDict._save_fn:
+            _PersistentDict._save_fn()
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        if _PersistentDict._save_fn:
+            _PersistentDict._save_fn()
+
+    def pop(self, key, *args):
+        result = super().pop(key, *args)
+        if _PersistentDict._save_fn:
+            _PersistentDict._save_fn()
+        return result
+
+    def clear(self):
+        super().clear()
+        if _PersistentDict._save_fn:
+            _PersistentDict._save_fn()
+
+# Replace the dicts above with persistent versions
+PENDING_NEWS = _PersistentDict()
+POST_HISTORY = _PersistentDict()
+
+
+def _save_state():
+    """Persist PENDING_NEWS + POST_HISTORY to disk."""
+    try:
+        import json
+        def serialize_dict(d):
+            out = {}
+            for k, v in d.items():
+                if not isinstance(v, dict):
+                    continue
+                clean = {}
+                for kk, vv in v.items():
+                    try:
+                        json.dumps(vv)
+                        clean[kk] = vv
+                    except (TypeError, ValueError):
+                        pass
+                out[str(k)] = clean
+            return out
+
+        state = {
+            "pending": serialize_dict(PENDING_NEWS),
+            "history": serialize_dict(POST_HISTORY),
+        }
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False))
+    except Exception:
+        pass
+
+# Wire up auto-save
+_PersistentDict._save_fn = _save_state
+
+
+def _load_state():
+    """Restore PENDING_NEWS + POST_HISTORY from disk on bot startup."""
+    try:
+        if not STATE_FILE.exists():
+            return
+        import json
+        data = json.loads(STATE_FILE.read_text())
+        # Convert string keys back to int (user_ids), bypass auto-save during load
+        for k, v in data.get("pending", {}).items():
+            dict.__setitem__(PENDING_NEWS, int(k), v)
+        for k, v in data.get("history", {}).items():
+            dict.__setitem__(POST_HISTORY, int(k), v)
+        print(f"💾 Loaded state: {len(PENDING_NEWS)} pending, {len(POST_HISTORY)} in history")
+    except Exception as e:
+        print(f"⚠️ State load failed: {e}")
+
+
+# Load saved state on import (survives restarts)
+_load_state()
 
 # 🎬 Video export presets - user picks before processing
 VIDEO_EXPORT_PRESETS = {
@@ -340,7 +422,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 4.0 (لكل موديل يجرب كل المفاتيح + خلفية جديدة + حماية من NoneType)"
+        "• الإصدار: 4.1 (الذاكرة تبقى بعد إعادة التشغيل + تنظيف يدوي فقط)"
     )
     await update.message.reply_text(msg)
 
@@ -945,12 +1027,12 @@ async def handle_regen_callback(update, ctx):
             # Ask user to upload a custom image/video
             history_news = POST_HISTORY.get(user_id, {}).get("news")
             if not history_news:
-                # No news in history - the session expired or was cleaned
+                # No news in history - the session is truly missing
                 try:
                     await query.edit_message_text(
-                        "⚠️ انتهت الجلسة المؤقتة.\n\n"
-                        "💡 الذاكرة تُنظّف تلقائياً بعد فترة.\n"
-                        "أرسل /post أو رابط للبدء من جديد."
+                        "⚠️ تعذر إيجاد بيانات المنشور.\n\n"
+                        "💡 الذاكرة الآن لا تُمسح تلقائياً.\n"
+                        "ربما البوت أُعيد تشغيله. أرسل المنشور (رابط/نص) مرة أخرى."
                     )
                 except: pass
                 return
@@ -1509,7 +1591,7 @@ async def handle_reverse_text(update, ctx, text):
 
 
 async def handle_photo(update, ctx):
-    cleanup_old_temp_files(user_id=update.effective_user.id)
+    # (cleanup is now MANUAL ONLY via /clean or button - no auto-cleanup)
     """Photo handler — two cases:
     1. User is uploading a custom image for pending news
     2. User sent a screenshot with caption (extract news from caption)
@@ -1600,7 +1682,7 @@ async def handle_photo(update, ctx):
 
 
 async def handle_video(update, ctx):
-    cleanup_old_temp_files(user_id=update.effective_user.id)
+    # (cleanup is now MANUAL ONLY via /clean or button - no auto-cleanup)
     """User uploaded a video. Two cases:
     1. They're providing custom video for pending news (extract frame)
     2. They're sending a video with caption to convert to post
@@ -1900,7 +1982,7 @@ async def extract_video_frame(video_path, frame_path):
 
 async def handle_text_router(update, ctx):
     text = (update.message.text or "").strip()
-    cleanup_old_temp_files(user_id=update.effective_user.id)
+    # (cleanup is now MANUAL ONLY via /clean or button - no auto-cleanup)
 
     # 🆕 Handle persistent ReplyKeyboard buttons
     if text == "🧹 تنظيف الذاكرة":
@@ -1946,7 +2028,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v4.0 (PROPER-KEY-FALLBACK+NEW-BG+NULL-NEWS-GUARD)...")
+    logger.info("🤖 Starting 4Ever Bot v4.1 (PERSISTENT-STATE+NO-AUTO-CLEANUP)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
