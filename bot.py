@@ -340,7 +340,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 3.9 (تدوير ذكي للمفاتيح يتعرف على المفاتيح المعطلة + التفاف العنوان الفرعي)"
+        "• الإصدار: 4.0 (لكل موديل يجرب كل المفاتيح + خلفية جديدة + حماية من NoneType)"
     )
     await update.message.reply_text(msg)
 
@@ -943,9 +943,21 @@ async def handle_regen_callback(update, ctx):
 
         elif data.startswith("regen_upload_"):
             # Ask user to upload a custom image/video
+            history_news = POST_HISTORY.get(user_id, {}).get("news")
+            if not history_news:
+                # No news in history - the session expired or was cleaned
+                try:
+                    await query.edit_message_text(
+                        "⚠️ انتهت الجلسة المؤقتة.\n\n"
+                        "💡 الذاكرة تُنظّف تلقائياً بعد فترة.\n"
+                        "أرسل /post أو رابط للبدء من جديد."
+                    )
+                except: pass
+                return
+
             PENDING_NEWS[user_id] = {
                 "kind": "awaiting_custom_media",
-                "news": POST_HISTORY.get(user_id, {}).get("news"),
+                "news": history_news,
                 "chat_id": query.message.chat_id,
                 "user_id": user_id,
             }
@@ -1507,7 +1519,15 @@ async def handle_photo(update, ctx):
 
     # Case 1: User uploading custom image for pending news (either fresh or regen flow)
     if pending and (pending.get("awaiting_image") or pending.get("kind") == "awaiting_custom_media"):
-        news = pending["news"]
+        news = pending.get("news")
+        if not news or not isinstance(news, dict):
+            # Defensive: news lost somehow → ask user to start over
+            await update.message.reply_text(
+                "⚠️ انتهت الجلسة - فُقدت بيانات المنشور.\n"
+                "أرسل /post أو رابط للبدء من جديد."
+            )
+            PENDING_NEWS.pop(user_id, None)
+            return
         progress = await update.message.reply_text(
             "📸 *تم استلام صورتك! جاري التصميم...*",
             parse_mode="Markdown"
@@ -1651,7 +1671,14 @@ async def handle_video(update, ctx):
 
     # Case 1: User uploading custom video for pending news (fresh or regen)
     if pending and (pending.get("awaiting_image") or pending.get("kind") == "awaiting_custom_media"):
-        news = pending["news"]
+        news = pending.get("news")
+        if not news or not isinstance(news, dict):
+            await update.message.reply_text(
+                "⚠️ انتهت الجلسة - فُقدت بيانات المنشور.\n"
+                "أرسل /post أو رابط للبدء من جديد."
+            )
+            PENDING_NEWS.pop(user_id, None)
+            return
 
         # 🎯 Validate video constraints BEFORE downloading
         file_obj = video or document
@@ -1919,7 +1946,7 @@ async def error_handler(update, ctx):
 
 
 def main():
-    logger.info("🤖 Starting 4Ever Bot v3.9 (SMART-KEY-ROTATION+SUBTITLE-WRAP+EXPORT-PRESETS)...")
+    logger.info("🤖 Starting 4Ever Bot v4.0 (PROPER-KEY-FALLBACK+NEW-BG+NULL-NEWS-GUARD)...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))

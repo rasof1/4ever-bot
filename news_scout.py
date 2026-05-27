@@ -548,7 +548,10 @@ def truncate_headline(text, max_len):
 
 
 def _call_gemini(prompt, body_overrides=None):
-    """Try each fallback model until one succeeds."""
+    """Try each (model, key) combination until one succeeds.
+    For each model: try ALL live keys before moving to next model.
+    This way if Key 0 is rate-limited but Key 1 works, we use Key 1 immediately.
+    """
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "tools": [{"google_search": {}}],
@@ -564,69 +567,80 @@ def _call_gemini(prompt, body_overrides=None):
 
     last_err = None
     for idx, model in enumerate(FALLBACK_MODELS):
-        url = f"{GEMINI_API_BASE}/{model}:generateContent?key={get_current_key()}"
-        try:
-            log.info(f"🤖 Model {idx+1}/{len(FALLBACK_MODELS)}: {model}")
-            r = requests.post(url, json=body, timeout=90)
-            if r.status_code == 429:
-                log.warning(f"   ⚠️  {model} rate limited (key {_KEY_INDEX[0]}), rotating key + trying next...")
-                rotate_key()
-                last_err = RuntimeError(f"{model} rate limited")
-                time.sleep(2)
-                continue
-            if r.status_code == 403:
-                # Detect leaked/blocked key vs generic 403
-                err_msg = ""
-                try:
-                    err_msg = r.json().get("error", {}).get("message", "").lower()
-                except Exception:
-                    pass
-                if "leaked" in err_msg or "api key" in err_msg or "blocked" in err_msg:
-                    log.warning(f"   💀 Key {_KEY_INDEX[0]} is LEAKED/BLOCKED by Google - marking dead")
-                    mark_key_dead(reason="leaked/blocked")
-                else:
-                    log.warning(f"   ⚠️  {model} 403 (not key-related), rotating...")
-                    rotate_key()
-                last_err = RuntimeError(f"{model}: {err_msg[:80] or '403 blocked'}")
-                continue
-            if r.status_code == 404:
-                log.warning(f"   ⚠️  {model} not found")
-                last_err = RuntimeError(f"{model} not found")
-                continue
-            r.raise_for_status()
-            data = r.json()
-            if "candidates" not in data or not data["candidates"]:
-                last_err = RuntimeError(f"Empty response from {model}")
-                continue
-            cand = data["candidates"][0]
-            content_obj = cand.get("content", {})
-            if not isinstance(content_obj, dict):
-                last_err = RuntimeError(f"Unexpected content type from {model}: {type(content_obj)}")
-                continue
-            parts = content_obj.get("parts", [])
-            if not isinstance(parts, list):
-                last_err = RuntimeError(f"Parts not a list from {model}")
-                continue
-            text_pieces = []
-            for p in parts:
-                if isinstance(p, dict):
-                    text_pieces.append(p.get("text", ""))
-                elif isinstance(p, str):
-                    text_pieces.append(p)
-            text = "".join(text_pieces)
-            if not text:
-                last_err = RuntimeError(f"No text from {model}")
-                continue
-            log.info(f"   ✅ {model} OK ({len(text)} chars)")
-            return extract_json(text)
-        except RuntimeError:
-            raise
-        except Exception as e:
-            last_err = e
-            log.warning(f"   {model} failed: {e}")
-            continue
+        live_keys = [k for k in GEMINI_API_KEYS if k not in _DEAD_KEYS]
+        if not live_keys:
+            log.error("💀 ALL keys are dead, cannot continue")
+            break
 
-    raise RuntimeError(f"All {len(FALLBACK_MODELS)} models exhausted. Last: {last_err}")
+        for key_attempt, key in enumerate(live_keys):
+            _KEY_INDEX[0] = GEMINI_API_KEYS.index(key)
+            url = f"{GEMINI_API_BASE}/{model}:generateContent?key={key}"
+            try:
+                log.info(f"🤖 Model {idx+1}/{len(FALLBACK_MODELS)}: {model} (key {_KEY_INDEX[0]}, attempt {key_attempt+1}/{len(live_keys)})")
+                r = requests.post(url, json=body, timeout=90)
+
+                if r.status_code == 429:
+                    log.warning(f"   ⚠️  Key {_KEY_INDEX[0]} rate-limited on {model}, trying next key...")
+                    last_err = RuntimeError(f"{model} key {_KEY_INDEX[0]} rate limited")
+                    continue  # try next KEY
+
+                if r.status_code == 403:
+                    err_msg = ""
+                    try:
+                        err_msg = r.json().get("error", {}).get("message", "").lower()
+                    except Exception:
+                        pass
+                    if "leaked" in err_msg or "api key" in err_msg or "blocked" in err_msg:
+                        log.warning(f"   💀 Key {_KEY_INDEX[0]} LEAKED/BLOCKED - marking dead")
+                        mark_key_dead(reason="leaked/blocked")
+                        continue  # try next key (this one is now dead)
+                    log.warning(f"   ⚠️  {model} 403 (not key-related) on key {_KEY_INDEX[0]}")
+                    last_err = RuntimeError(f"{model}: {err_msg[:80] or '403'}")
+                    continue  # try next key
+
+                if r.status_code == 404:
+                    log.warning(f"   ⚠️  {model} not found, skipping to next model")
+                    last_err = RuntimeError(f"{model} not found")
+                    break  # skip to next MODEL
+
+                if r.status_code != 200:
+                    last_err = RuntimeError(f"{model} HTTP {r.status_code}")
+                    continue  # try next key
+
+                # Success path
+                data = r.json()
+                if "candidates" not in data or not data["candidates"]:
+                    last_err = RuntimeError(f"Empty candidates from {model}")
+                    continue
+                cand = data["candidates"][0]
+                content_obj = cand.get("content", {})
+                if not isinstance(content_obj, dict):
+                    last_err = RuntimeError(f"Bad content type from {model}")
+                    continue
+                parts = content_obj.get("parts", [])
+                if not isinstance(parts, list):
+                    last_err = RuntimeError(f"Parts not a list from {model}")
+                    continue
+                text_pieces = []
+                for p in parts:
+                    if isinstance(p, dict):
+                        text_pieces.append(p.get("text", ""))
+                    elif isinstance(p, str):
+                        text_pieces.append(p)
+                text = "".join(text_pieces)
+                if not text:
+                    last_err = RuntimeError(f"No text from {model}")
+                    continue
+                log.info(f"   ✅ {model} OK via key {_KEY_INDEX[0]} ({len(text)} chars)")
+                return extract_json(text)
+            except RuntimeError:
+                raise
+            except Exception as e:
+                last_err = e
+                log.warning(f"   {model} key {_KEY_INDEX[0]} exception: {str(e)[:100]}")
+                continue
+
+    raise RuntimeError(f"All {len(FALLBACK_MODELS)} models × {len(GEMINI_API_KEYS)} keys exhausted. Last: {last_err}")
 
 
 def _finalize_result(result):
