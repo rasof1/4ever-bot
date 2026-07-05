@@ -586,16 +586,19 @@ def _call_gemini(prompt, body_overrides=None):
 
                 if r.status_code == 403:
                     err_msg = ""
+                    raw_body = ""
                     try:
+                        raw_body = r.text[:300]
                         err_msg = r.json().get("error", {}).get("message", "").lower()
                     except Exception:
                         pass
+                    log.warning(f"   🔎 403 RAW BODY (key {_KEY_INDEX[0]}, {model}): {raw_body}")
                     if "leaked" in err_msg or "api key" in err_msg or "blocked" in err_msg:
                         log.warning(f"   💀 Key {_KEY_INDEX[0]} LEAKED/BLOCKED - marking dead")
                         mark_key_dead(reason="leaked/blocked")
                         continue  # try next key (this one is now dead)
-                    log.warning(f"   ⚠️  {model} 403 (not key-related) on key {_KEY_INDEX[0]}")
-                    last_err = RuntimeError(f"{model}: {err_msg[:80] or '403'}")
+                    log.warning(f"   ⚠️  {model} 403 (not key-related) on key {_KEY_INDEX[0]}: {raw_body[:150]}")
+                    last_err = RuntimeError(f"{model}: {(err_msg[:80] if err_msg else raw_body[:100]) or '403 (no body)'}")
                     continue  # try next key
 
                 if r.status_code == 404:
