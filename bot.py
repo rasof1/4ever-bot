@@ -422,7 +422,7 @@ async def cmd_status(update, ctx):
         f"• الخطوط: {'✅' if fonts_exist else '❌'}\n"
         f"• Render: {RENDER_URL or 'local'}\n"
         f"• Pending: {len(PENDING_NEWS)}\n"
-        "• الإصدار: 4.2 (الذاكرة تبقى بعد إعادة التشغيل + تنظيف يدوي فقط)"
+        "• الإصدار: 4.4 (الذاكرة تبقى بعد إعادة التشغيل + تنظيف يدوي فقط)"
     )
     await update.message.reply_text(msg)
 
