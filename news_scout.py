@@ -16,8 +16,8 @@ if not GEMINI_API_KEY:
 
 # 🔑 API key pool - rotates on rate-limit failures
 # Primary from env, backups hardcoded as fallback
-_BACKUP_KEYS = [os.getenv("GEMINI_API_KEY_2", "")]
-GEMINI_API_KEYS = [GEMINI_API_KEY] + [k for k in _BACKUP_KEYS if k and k != GEMINI_API_KEY]
+# 🔑 مفتاح واحد فقط - بدون تدوير/احتياطي (بحسب الطلب)
+GEMINI_API_KEYS = [GEMINI_API_KEY]
 _DEAD_KEYS = set()   # permanently bad keys (403 leaked/blocked) - skipped forever
 _KEY_INDEX = [0]     # mutable so functions can rotate
 
