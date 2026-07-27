@@ -592,12 +592,6 @@ def _call_gemini(prompt, body_overrides=None):
                         err_msg = r.json().get("error", {}).get("message", "").lower()
                     except Exception:
                         pass
-                    if r.status_code == 403:
-                    err_msg = ""
-                    try:
-                        err_msg = r.json().get("error", {}).get("message", "").lower()
-                    except Exception:
-                        pass
                     if "leaked" in err_msg or "api key" in err_msg or "blocked" in err_msg:
                         log.warning(f"   💀 Key {_KEY_INDEX[0]} LEAKED/BLOCKED - marking dead")
                         mark_key_dead(reason="leaked/blocked")
