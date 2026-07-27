@@ -10,14 +10,13 @@ import logging
 import requests
 from urllib.parse import urlparse, quote
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
+raw_keys = os.getenv("GEMINI_API_KEY", "")
+if not raw_keys:
     raise RuntimeError("GEMINI_API_KEY not set")
 
-# 🔑 API key pool - rotates on rate-limit failures
-# Primary from env, backups hardcoded as fallback
-# 🔑 مفتاح واحد فقط - بدون تدوير/احتياطي (بحسب الطلب)
-GEMINI_API_KEYS = [GEMINI_API_KEY]
+# تفكيك جميع المفاتيح عند وجود فاصلة (,) لاستخدامها بالتناوب
+GEMINI_API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
+
 _DEAD_KEYS = set()   # permanently bad keys (403 leaked/blocked) - skipped forever
 _KEY_INDEX = [0]     # mutable so functions can rotate
 
